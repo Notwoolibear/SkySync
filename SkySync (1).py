@@ -26,6 +26,7 @@ TARGETS = {
     "NOAA 19": 33591,
     "Sentinel-1A": 39634,
     "Sentinel-2A": 40697,
+    "Pixxel Firefly-3": 62710,
 }
 
 HERE = os.path.dirname(os.path.abspath(__file__))
