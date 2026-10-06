@@ -3,7 +3,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
-import pydeck as pdk
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 from skyfield.api import EarthSatellite, load, wgs84
@@ -133,6 +133,7 @@ def positions(sats, sources):
 
 
 st.title("🛰️ SkySync")
+st.caption("version 3 · plotly map")
 
 with st.spinner("Loading orbital data (up to ~20 seconds)..."):
     satellites, sources, errors = load_all()
@@ -172,38 +173,32 @@ def live_view():
         f"refreshes every {REFRESH_SECONDS}s · tracking {len(df)} satellites"
     )
 
-    map_df = df.rename(columns={"Lat (°)": "lat", "Lon (°)": "lon"})
-    layers = [
-        pdk.Layer(
-            "ScatterplotLayer",
-            data=map_df,
-            get_position="[lon, lat]",
-            get_fill_color=[255, 80, 80, 220],
-            get_radius=6,
-            radius_units="pixels",
-            radius_min_pixels=4,
-            radius_max_pixels=8,
-            pickable=True,
-        ),
-        pdk.Layer(
-            "TextLayer",
-            data=map_df,
-            get_position="[lon, lat]",
-            get_text="Satellite",
-            get_size=14,
-            get_color=[255, 255, 255, 255],
-            get_pixel_offset=[0, -16],
-        ),
-    ]
-    st.pydeck_chart(
-        pdk.Deck(
-            layers=layers,
-            initial_view_state=pdk.ViewState(latitude=20, longitude=0, zoom=0.6),
-            tooltip={"text": "{Satellite}\nAlt: {Alt (km)} km"},
-        ),
-        use_container_width=True,
+    fig = go.Figure(
+        go.Scattergeo(
+            lat=df["Lat (°)"],
+            lon=df["Lon (°)"],
+            text=df["Satellite"],
+            mode="markers+text",
+            textposition="top center",
+            textfont=dict(size=12),
+            marker=dict(size=9, color="red", line=dict(width=1, color="white")),
+            customdata=df["Alt (km)"],
+            hovertemplate="%{text}<br>Alt: %{customdata} km<extra></extra>",
+        )
     )
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    fig.update_geos(
+        projection_type="natural earth",
+        showland=True,
+        landcolor="#2b3a42",
+        showocean=True,
+        oceancolor="#0e1a22",
+        showcountries=True,
+        countrycolor="#46565e",
+        showframe=False,
+    )
+    fig.update_layout(height=480, margin=dict(l=0, r=0, t=0, b=0))
+    st.plotly_chart(fig, width="stretch")
+    st.dataframe(df, hide_index=True, width="stretch")
 
 
 live_view()
