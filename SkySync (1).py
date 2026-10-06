@@ -37,21 +37,22 @@ TARGETS = {
 # The name on the left must match the name in TARGETS above exactly.
 # Keep the comma at the end of every line.
 # ---------------------------------------------------------------------------
+a = "Description:"
 DESCRIPTIONS = {
-    "ISS": "The ISS is a large space station in low Earth orbit that serves as a laboratory for scientific research and technology experiments. It is operated through international cooperation and has been continuously inhabited since 2000.",
-    "HUBBLE": "will add soon",
-    "CSS (Tianhe)": "will add soon",
-    "Envisat": "will add soon",
-    "TERRA": "will add soon",
-    "Aqua": "will add soon",
-    "NOAA 15": "will add soon",
-    "NOAA 18": "will add soon",
-    "NOAA 19": "will add soon",
-    "Sentinel-1A": "will add soon",
-    "Sentinel-2A": "will add soon",
-    "Pixxel firefly 1": "will add soon",
-    "Pixxel firefly 2": "will add soon",
-    "Pixxel firefly 3m": "will add soon",
+    "ISS": a ,"The ISS is a large space station in low Earth orbit that serves as a laboratory for scientific research and technology experiments. It is operated through international cooperation and has been continuously inhabited since 2000.",
+    "HUBBLE": a ,"will add soon",
+    "CSS (Tianhe)": a ,"will add soon",
+    "Envisat": a ,"will add soon",
+    "TERRA": a ,"will add soon",
+    "Aqua": a ,"will add soon",
+    "NOAA 15": a ,"will add soon",
+    "NOAA 18": a ,"will add soon",
+    "NOAA 19": a ,"will add soon",
+    "Sentinel-1A": a ,"will add soon",
+    "Sentinel-2A": a ,"will add soon",
+    "Pixxel firefly 1": a ,"will add soon",
+    "Pixxel firefly 2": a ,"will add soon",
+    "Pixxel firefly 3m": a ,"will add soon",
 }
 
 HERE = os.path.dirname(os.path.abspath(__file__))
