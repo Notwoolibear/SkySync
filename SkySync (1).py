@@ -26,6 +26,8 @@ TARGETS = {
     "NOAA 19": 33591,
     "Sentinel-1A": 39634,
     "Sentinel-2A": 40697,
+    "Pixxel Firefly-1": 62701,
+    "Pixxel Firefly-2": 62704,
     "Pixxel Firefly-3": 62710,
 }
 
