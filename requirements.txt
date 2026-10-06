@@ -1,0 +1,4 @@
+streamlit
+skyfield
+pandas
+pydeck
