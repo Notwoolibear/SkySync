@@ -12,6 +12,7 @@ st.set_page_config(page_title="SkySync", layout="wide")
 
 REFRESH_SECONDS = 5
 TIMEOUT = 8  # seconds per download attempt
+ZOOM_SCALE = 5  # how far the map zooms in on a chosen satellite
 
 # label -> NORAD catalog number
 TARGETS = {
@@ -26,9 +27,25 @@ TARGETS = {
     "NOAA 19": 33591,
     "Sentinel-1A": 39634,
     "Sentinel-2A": 40697,
-    "Pixxel Firefly-1": 62701,
-    "Pixxel Firefly-2": 62704,
-    "Pixxel Firefly-3": 62710,
+}
+
+# ---------------------------------------------------------------------------
+# YOUR DESCRIPTIONS: replace the text between the quotes for each satellite.
+# The name on the left must match the name in TARGETS above exactly.
+# Keep the comma at the end of every line.
+# ---------------------------------------------------------------------------
+DESCRIPTIONS = {
+    "ISS": "Write your description of the ISS here.",
+    "Hubble": "Write your description of Hubble here.",
+    "CSS (Tianhe)": "Write your description of CSS (Tianhe) here.",
+    "Envisat": "Write your description of Envisat here.",
+    "Terra": "Write your description of Terra here.",
+    "Aqua": "Write your description of Aqua here.",
+    "NOAA 15": "Write your description of NOAA 15 here.",
+    "NOAA 18": "Write your description of NOAA 18 here.",
+    "NOAA 19": "Write your description of NOAA 19 here.",
+    "Sentinel-1A": "Write your description of Sentinel-1A here.",
+    "Sentinel-2A": "Write your description of Sentinel-2A here.",
 }
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +56,7 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 ts = load.timescale()
 
 
+# ------------------------------ data loading -------------------------------
 def parse_tle_text(text):
     """Return {catnr: (name, line1, line2)} from 2-line or 3-line TLE text."""
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -109,6 +127,7 @@ def load_all():
     return sats, sources, errors
 
 
+# ------------------------------ calculations -------------------------------
 def positions(sats, sources):
     now = ts.now()
     rows = []
@@ -123,6 +142,7 @@ def positions(sats, sources):
         rows.append(
             {
                 "Satellite": label,
+                "NORAD ID": TARGETS[label],
                 "Lat (°)": round(sp.latitude.degrees, 4),
                 "Lon (°)": round(sp.longitude.degrees, 4),
                 "Alt (km)": round(sp.elevation.km, 1),
@@ -135,58 +155,25 @@ def positions(sats, sources):
     return now, pd.DataFrame(rows)
 
 
-st.title("🛰️ SkySync")
-st.caption("version 3 · plotly map")
-
-with st.spinner("Loading orbital data (up to ~20 seconds)..."):
-    satellites, sources, errors = load_all()
-
-if errors:
-    st.warning(
-        "Could not load: "
-        + ", ".join(f"{k} ({v})" for k, v in errors.items())
-    )
-    if st.button("Retry failed downloads"):
-        load_all.clear()
-        st.rerun()
-
-if not satellites:
-    st.error(
-        "No satellites could be loaded. The server may be blocked from "
-        "downloading orbital data. See the note about tles.txt."
-    )
-    st.stop()
-
-if any(s in ("saved copy", "tles.txt") for s in sources.values()):
-    st.info(
-        "Some satellites are using saved orbital data instead of a live download. "
-        "Positions get less accurate as the 'TLE age' grows."
-    )
-
-
-@st.fragment(run_every=REFRESH_SECONDS)
-def live_view():
-    now, df = positions(satellites, sources)
-    if df.empty:
-        st.error("No positions could be calculated.")
-        return
-
-    st.caption(
-        f"Last updated: {now.utc_strftime('%Y-%m-%d %H:%M:%S')} UTC · "
-        f"refreshes every {REFRESH_SECONDS}s · tracking {len(df)} satellites"
-    )
+# --------------------------------- display ---------------------------------
+def build_map(df, row):
+    """World map with one dot per satellite. Zooms to `row` if one is chosen."""
+    names = df["Satellite"].tolist()
+    chosen = row["Satellite"] if row is not None else None
+    colors = ["#ffd166" if n == chosen else "#ff4d4d" for n in names]
+    sizes = [16 if n == chosen else 11 for n in names]
 
     fig = go.Figure(
         go.Scattergeo(
             lat=df["Lat (°)"],
             lon=df["Lon (°)"],
-            text=df["Satellite"],
+            text=names,
             mode="markers+text",
             textposition="top center",
-            textfont=dict(size=12),
-            marker=dict(size=9, color="red", line=dict(width=1, color="white")),
-            customdata=df["Alt (km)"],
-            hovertemplate="%{text}<br>Alt: %{customdata} km<extra></extra>",
+            textfont=dict(size=12, color="#e8eef2"),
+            marker=dict(size=sizes, color=colors, line=dict(width=1, color="white")),
+            customdata=df[["Satellite", "Alt (km)"]].values.tolist(),
+            hovertemplate="%{customdata[0]}<br>Alt: %{customdata[1]} km<extra></extra>",
         )
     )
     fig.update_geos(
@@ -199,9 +186,131 @@ def live_view():
         countrycolor="#46565e",
         showframe=False,
     )
-    fig.update_layout(height=480, margin=dict(l=0, r=0, t=0, b=0))
-    st.plotly_chart(fig, width="stretch")
-    st.dataframe(df, hide_index=True, width="stretch")
+    if row is not None:
+        fig.update_geos(
+            center=dict(lat=float(row["Lat (°)"]), lon=float(row["Lon (°)"])),
+            projection_scale=ZOOM_SCALE,
+        )
+    fig.update_layout(height=520, margin=dict(l=0, r=0, t=0, b=0))
+    return fig
+
+
+def clicked_name(event, df):
+    """Name of the satellite whose dot was clicked, or None."""
+    try:
+        points = event["selection"]["points"]
+    except Exception:
+        return None
+    if not points:
+        return None
+    pt = points[0]
+    name = None
+    cd = pt.get("customdata")
+    if cd:
+        name = cd[0] if isinstance(cd, (list, tuple)) else cd
+    if name is None and pt.get("point_index") is not None:
+        idx = pt["point_index"]
+        if 0 <= idx < len(df):
+            name = df.iloc[idx]["Satellite"]
+    if name is None:
+        name = pt.get("text")
+    return name if name in TARGETS else None
+
+
+def show_info(row):
+    label = row["Satellite"]
+    with st.container(border=True):
+        st.subheader(label)
+        a, b = st.columns(2)
+        a.metric("NORAD ID", str(int(row["NORAD ID"])))
+        b.metric("Altitude", f"{row['Alt (km)']:,.1f} km")
+        a, b = st.columns(2)
+        a.metric("Speed", f"{row['Speed (km/s)']:.2f} km/s")
+        b.metric("Speed", f"{int(row['Speed (km/h)']):,} km/h")
+        a, b = st.columns(2)
+        a.metric("Longitude", f"{row['Lon (°)']:.4f}°")
+        b.metric("Latitude", f"{row['Lat (°)']:.4f}°")
+        st.markdown(DESCRIPTIONS.get(label) or "No description yet.")
+
+
+# ----------------------------------- page ----------------------------------
+DEBUG = "debug" in st.query_params  # open your link with ?debug=1 to see data status
+
+st.title("🛰️ SkySync")
+
+with st.spinner("Loading orbital data (up to ~20 seconds)..."):
+    satellites, sources, errors = load_all()
+
+if not satellites:
+    st.error(
+        "No satellites could be loaded. The server may be blocked from "
+        "downloading orbital data. Add a tles.txt file to the repository."
+    )
+    st.stop()
+
+if DEBUG:
+    st.caption("version 4 · search + zoom")
+    if errors:
+        st.warning(
+            "Could not load: " + ", ".join(f"{k} ({v})" for k, v in errors.items())
+        )
+
+# A click on a dot sets this, and it is applied to the search box before it is drawn.
+if "pending_search" in st.session_state:
+    st.session_state["search"] = st.session_state.pop("pending_search")
+st.session_state.setdefault("map_version", 0)
+
+st.selectbox(
+    "Search satellites",
+    options=sorted(satellites, key=str.lower),
+    index=None,
+    placeholder="Search satellites…",
+    key="search",
+    label_visibility="collapsed",
+)
+
+
+@st.fragment(run_every=REFRESH_SECONDS)
+def live_view():
+    now, df = positions(satellites, sources)
+    if df.empty:
+        st.error("No positions could be calculated.")
+        return
+
+    row = None
+    chosen = st.session_state.get("search")
+    if chosen:
+        match = df[df["Satellite"] == chosen]
+        if not match.empty:
+            row = match.iloc[0]
+
+    if row is not None:
+        map_col, info_col = st.columns([3, 2])
+    else:
+        map_col, info_col = st.container(), None
+
+    with map_col:
+        event = st.plotly_chart(
+            build_map(df, row),
+            width="stretch",
+            on_select="rerun",
+            selection_mode="points",
+            key=f"map_{st.session_state.map_version}",
+        )
+
+    clicked = clicked_name(event, df)
+    if clicked:
+        st.session_state["pending_search"] = clicked
+        st.session_state.map_version += 1  # fresh chart, so the click isn't reused
+        st.rerun()
+
+    if info_col is not None:
+        with info_col:
+            show_info(row)
+
+    if DEBUG:
+        st.caption(f"Last updated: {now.utc_strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        st.dataframe(df, hide_index=True, width="stretch")
 
 
 live_view()
