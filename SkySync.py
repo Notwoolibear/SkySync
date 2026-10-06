@@ -1,214 +1,206 @@
 import math
 import os
-import time
-import logging
-from importlib import import_module
+from concurrent.futures import ThreadPoolExecutor
 
-try:
-    skyfield_api = import_module("skyfield.api")
-    Loader = skyfield_api.Loader
-    wgs84 = skyfield_api.wgs84
-except ImportError as exc:
-    raise SystemExit(
-        "Skyfield is not installed. Run: python -m pip install skyfield"
-    ) from exc
+import pandas as pd
+import pydeck as pdk
+import requests
+import streamlit as st
+from skyfield.api import EarthSatellite, load, wgs84
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
-log = logging.getLogger("satellite_tracker")
+st.set_page_config(page_title="SkySync", layout="wide")
 
+REFRESH_SECONDS = 5
+TIMEOUT = 8  # seconds per download attempt
+
+# label -> NORAD catalog number
 TARGETS = {
-    "ISS": {
-        "url": (
-            "https://celestrak.org/NORAD/elements/gp.php"
-            "?GROUP=stations&FORMAT=tle"
-        ),
-      
-        "filename": "stations.tle",
-        "match": lambda name: "ISS" in name.upper(),
-    },
-    "Hubble": {
-        "url": (
-            "https://celestrak.org/NORAD/elements/gp.php"
-            "?CATNR=20580&FORMAT=tle"
-        ),
-        "filename": "hst.tle",
-        "match": lambda name: "HST" in name.upper() or "HUBBLE" in name.upper(),
-    },
-    "CSS": {
-        "url": (
-            "https://celestrak.org/NORAD/elements/gp.php"
-            "?GROUP=active&FORMAT=tle"
-        ),
-        "filename": "css.tle",
-        "match": lambda name: "CSS" in name.upper(),
-    },
-    "Envisat": {
-        "url": (
-            "https://celestrak.org/NORAD/elements/gp.php"
-            "?CATNR=27386&FORMAT=tle"
-        ),
-        "filename": "envisat.tle",
-        "match": lambda name: "ENVISAT" in name.upper(),
-    },
-    "Terra": {
-        "url": (
-            "https://celestrak.org/NORAD/elements/gp.php"
-            "?CATNR=25994&FORMAT=tle"
-        ),
-        "filename": "terra.tle",
-        "match": lambda name: "TERRA" in name.upper(),
-    },
-    "Aqua": {
-        "url": (
-            "https://celestrak.org/NORAD/elements/gp.php"
-            "?CATNR=27424&FORMAT=tle"
-        ),
-        "filename": "aqua.tle",
-        "match": lambda name: "AQUA" in name.upper(),
-    },
-    "NOAA 15": {
-        "url": (    
-            "https://celestrak.org/NORAD/elements/gp.php"
-            "?CATNR=25338&FORMAT=tle"
-        ),
-        "filename": "noaa15.tle",
-        "match": lambda name: "NOAA 15" in name.upper(),
-    },
-    "NOAA 18": {
-        "url": (    
-            "https://celestrak.org/NORAD/elements/gp.php"
-            "?CATNR=28654&FORMAT=tle"
-        ),
-        "filename": "noaa18.tle",
-        "match": lambda name: "NOAA 18" in name.upper(),
-    },
-    "NOAA 19": {
-        "url": (    
-            "https://celestrak.org/NORAD/elements/gp.php"
-            "?CATNR=33591&FORMAT=tle"
-        ),
-        "filename": "noaa19.tle",
-        "match": lambda name: "NOAA 19" in name.upper(),
-    },
-    "Sentinel-1A": {
-        "url": (    
-            "https://celestrak.org/NORAD/elements/gp.php"
-            "?CATNR=39634&FORMAT=tle"
-        ),
-        "filename": "sentinel1a.tle",
-        "match": lambda name: "SENTINEL-1A" in name.upper(),
-
-    },
-    "Sentinel-2A": {
-        "url": (    
-            "https://celestrak.org/NORAD/elements/gp.php"
-            "?CATNR=40697&FORMAT=tle"
-        ),
-        "filename": "sentinel2a.tle",
-        "match": lambda name: "SENTINEL-2A" in name.upper(),
-    }
+    "ISS": 25544,
+    "Hubble": 20580,
+    "CSS (Tianhe)": 48274,
+    "Envisat": 27386,
+    "Terra": 25994,
+    "Aqua": 27424,
+    "NOAA 15": 25338,
+    "NOAA 18": 28654,
+    "NOAA 19": 33591,
+    "Sentinel-1A": 39634,
+    "Sentinel-2A": 40697,
 }
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+BUNDLED = os.path.join(HERE, "tles.txt")  # optional file you can add to the repo
+CACHE_DIR = os.path.join(os.path.expanduser("~"), "skysync_data")
+os.makedirs(CACHE_DIR, exist_ok=True)
 
-def load_satellite(custom_load, label, url, filename, match_fn):
-    """Fetch a TLE feed and return the first satellite whose name matches."""
-    log.debug(f"[{label}] TLE source URL = {url} -> cached as {filename}")
-
-    try:
-        satellites = custom_load.tle_file(url, filename=filename)
-        log.debug(f"[{label}] tle_file() returned {len(satellites)} records")
-    except Exception as e:
-        log.exception(f"[{label}] Network or parsing error downloading TLE data")
-        print(f"[{label}] Network error downloading TLE data: {e}")
-        return None
-
-    if not satellites:
-        log.error(f"[{label}] tle_file() returned an empty list")
-        print(f"[{label}] No satellite records were returned.")
-        return None
-
-    by_name = {sat.name: sat for sat in satellites}
-    log.debug(f"[{label}] Loaded {len(by_name)} named satellites, "
-              f"first few: {list(by_name.keys())[:5]}")
-
-    match_name = next((name for name in by_name if match_fn(name)), None)
-
-    if not match_name:
-        log.error(f"[{label}] No matching satellite name found in the dataset")
-        print(f"[{label}] Data not found in the Celestrak stream.")
-        return None
-
-    sat = by_name[match_name]
-    log.debug(f"[{label}] Selected satellite object: {sat}")
-    print(f"[{label}] Successfully loaded orbital elements for: {sat.name}")
-    return sat
+ts = load.timescale()
 
 
-def track_satellites():
-    base_dir = os.path.expanduser('~')
-    data_dir = os.path.join(base_dir, 'skyfield_data')
-    log.debug(f"Resolved base_dir = {base_dir}")
+def parse_tle_text(text):
+    """Return {catnr: (name, line1, line2)} from 2-line or 3-line TLE text."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    found = {}
+    for i in range(len(lines) - 1):
+        if lines[i].startswith("1 ") and lines[i + 1].startswith("2 "):
+            name = ""
+            if i > 0 and not lines[i - 1][:2] in ("1 ", "2 "):
+                name = lines[i - 1]
+            try:
+                found[int(lines[i][2:7])] = (name, lines[i], lines[i + 1])
+            except ValueError:
+                pass
+    return found
 
-    os.makedirs(data_dir, exist_ok=True)
-    data_dir = data_dir.rstrip('\\/')
-    log.debug(f"Skyfield cache directory = {data_dir}")
 
-    custom_load = Loader(data_dir)
-    ts = custom_load.timescale()
+def from_celestrak(catnr):
+    url = f"https://celestrak.org/NORAD/elements/gp.php?CATNR={catnr}&FORMAT=tle"
+    r = requests.get(url, timeout=TIMEOUT)
+    r.raise_for_status()
+    return parse_tle_text(r.text)[catnr]
 
-    print(f"Fetching live satellite data (caching to: {data_dir})...")
-    satellites = {}
-    for label, target in TARGETS.items():
-        sat = load_satellite(
-            custom_load, label, target["url"], target["filename"], target["match"]
+
+def from_backup_api(catnr):
+    r = requests.get(f"https://tle.ivanstanojevic.me/api/tle/{catnr}", timeout=TIMEOUT)
+    r.raise_for_status()
+    j = r.json()
+    return (j.get("name", ""), j["line1"], j["line2"])
+
+
+def fetch_one(label, catnr):
+    """Try live sources, then a saved copy, then tles.txt. Never raises."""
+    errors = []
+    cache_path = os.path.join(CACHE_DIR, f"{catnr}.tle")
+
+    for source, nice in ((from_celestrak, "Celestrak"), (from_backup_api, "backup API")):
+        try:
+            tle = source(catnr)
+            with open(cache_path, "w") as f:
+                f.write("\n".join(tle) + "\n")
+            return label, tle, f"live ({nice})", None
+        except Exception as e:
+            errors.append(f"{nice}: {type(e).__name__}")
+
+    for path, nice in ((cache_path, "saved copy"), (BUNDLED, "tles.txt")):
+        try:
+            with open(path) as f:
+                return label, parse_tle_text(f.read())[catnr], nice, None
+        except Exception:
+            pass
+
+    return label, None, None, "; ".join(errors)
+
+
+@st.cache_resource(ttl=6 * 3600, show_spinner=False)
+def load_all():
+    with ThreadPoolExecutor(max_workers=len(TARGETS)) as pool:
+        results = list(pool.map(lambda kv: fetch_one(*kv), TARGETS.items()))
+
+    sats, sources, errors = {}, {}, {}
+    for label, tle, source, err in results:
+        if tle is None:
+            errors[label] = err
+            continue
+        name, l1, l2 = tle
+        sats[label] = EarthSatellite(l1, l2, name or label, ts)
+        sources[label] = source
+    return sats, sources, errors
+
+
+def positions(sats, sources):
+    now = ts.now()
+    rows = []
+    for label, sat in sats.items():
+        try:
+            geo = sat.at(now)
+        except Exception:
+            continue  # e.g. decayed satellite with an outdated TLE
+        sp = wgs84.subpoint(geo)
+        vx, vy, vz = geo.velocity.km_per_s
+        speed = math.sqrt(vx**2 + vy**2 + vz**2)
+        rows.append(
+            {
+                "Satellite": label,
+                "Lat (°)": round(sp.latitude.degrees, 4),
+                "Lon (°)": round(sp.longitude.degrees, 4),
+                "Alt (km)": round(sp.elevation.km, 1),
+                "Speed (km/s)": round(speed, 2),
+                "Speed (km/h)": round(speed * 3600),
+                "TLE age (days)": round(now.tt - sat.epoch.tt, 1),
+                "Data": sources[label],
+            }
         )
-        if sat is not None:
-            satellites[label] = sat
+    return now, pd.DataFrame(rows)
 
-    if not satellites:
-        print("No satellites could be loaded. Aborting.")
+
+st.title("🛰️ SkySync")
+
+with st.spinner("Loading orbital data (up to ~20 seconds)..."):
+    satellites, sources, errors = load_all()
+
+if errors:
+    st.warning(
+        "Could not load: "
+        + ", ".join(f"{k} ({v})" for k, v in errors.items())
+    )
+    if st.button("Retry failed downloads"):
+        load_all.clear()
+        st.rerun()
+
+if not satellites:
+    st.error(
+        "No satellites could be loaded. The server may be blocked from "
+        "downloading orbital data. See the note about tles.txt."
+    )
+    st.stop()
+
+if any(s in ("saved copy", "tles.txt") for s in sources.values()):
+    st.info(
+        "Some satellites are using saved orbital data instead of a live download. "
+        "Positions get less accurate as the 'TLE age' grows."
+    )
+
+
+@st.fragment(run_every=REFRESH_SECONDS)
+def live_view():
+    now, df = positions(satellites, sources)
+    if df.empty:
+        st.error("No positions could be calculated.")
         return
 
-    print("-" * 50)
+    st.caption(
+        f"Last updated: {now.utc_strftime('%Y-%m-%d %H:%M:%S')} UTC · "
+        f"refreshes every {REFRESH_SECONDS}s · tracking {len(df)} satellites"
+    )
 
-    try:
-        while True:
-            now = ts.now()
-            print(f"Time (UTC): {now.utc_strftime('%Y-%m-%d %H:%M:%S')}")
-
-            for label, sat in satellites.items():
-                geocentric = sat.at(now)
-                subpoint = wgs84.subpoint(geocentric)
-
-                lat = subpoint.latitude.degrees
-                lon = subpoint.longitude.degrees
-                alt_km = subpoint.elevation.km
-
-                vx, vy, vz = geocentric.velocity.km_per_s
-                speed_km_s = math.sqrt(vx**2 + vy**2 + vz**2)
-                speed_kmh = speed_km_s * 3600
-
-                log.debug(
-                    f"[{label}] raw geocentric={geocentric.position.km}, "
-                    f"lat={lat}, lon={lon}, alt_km={alt_km}, "
-                    f"speed_km_s={speed_km_s}"
-                )
-
-                print(f"  {label:8s} | Lat {lat:8.4f}\u00b0 | "
-                      f"Lon {lon:8.4f}\u00b0 | Alt {alt_km:8.2f} km | "
-                      f"Speed {speed_km_s:6.2f} km/s ({speed_kmh:8.0f} km/h)")
-
-            print("-" * 50)
-            time.sleep(5)
-
-    except KeyboardInterrupt:
-        print("\nTracking stopped by user.")
-        log.info("Tracking loop exited via KeyboardInterrupt")
+    map_df = df.rename(columns={"Lat (°)": "lat", "Lon (°)": "lon"})
+    layers = [
+        pdk.Layer(
+            "ScatterplotLayer",
+            data=map_df,
+            get_position="[lon, lat]",
+            get_fill_color=[255, 80, 80, 220],
+            get_radius=150000,
+            pickable=True,
+        ),
+        pdk.Layer(
+            "TextLayer",
+            data=map_df,
+            get_position="[lon, lat]",
+            get_text="Satellite",
+            get_size=14,
+            get_color=[255, 255, 255, 255],
+            get_pixel_offset=[0, -16],
+        ),
+    ]
+    st.pydeck_chart(
+        pdk.Deck(
+            layers=layers,
+            initial_view_state=pdk.ViewState(latitude=20, longitude=0, zoom=0.6),
+            tooltip={"text": "{Satellite}\nAlt: {Alt (km)} km"},
+        ),
+        use_container_width=True,
+    )
+    st.dataframe(df, hide_index=True, use_container_width=True)
 
 
-if __name__ == "__main__":
-    track_satellites()
+live_view()
