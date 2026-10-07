@@ -30,6 +30,7 @@ TARGETS = {
     "Pixxel firefly 1": 62701,
     "Pixxel firefly 2": 62704,
     "Pixxel firefly 3": 62710,
+    "Sentinel 3B": 43437,
 }
 
 # ---------------------------------------------------------------------------
@@ -51,7 +52,8 @@ DESCRIPTIONS = {
     "Sentinel-2A": "Description: will add soon",
     "Pixxel firefly 1": "Description: will add soon",
     "Pixxel firefly 2": "Description: will add soon",
-    "Pixxel firefly 3m": "Description: will add soon",
+    "Pixxel firefly 3": "Description: will add soon",
+    "Sentinel 3B": "Description: will add soon",
 }
 
 HERE = os.path.dirname(os.path.abspath(__file__))
