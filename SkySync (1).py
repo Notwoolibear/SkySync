@@ -1,5 +1,7 @@
+import json
 import math
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
@@ -13,6 +15,12 @@ st.set_page_config(page_title="SkySync", layout="wide")
 REFRESH_SECONDS = 5
 TIMEOUT = 8  # seconds per download attempt
 ZOOM_SCALE = 5  # how far the map zooms in on a chosen satellite
+
+# Free AI descriptions (Google Gemini). The key is read from Streamlit Secrets,
+# never from this file. If the default model name stops working, put the current
+# free model name in Secrets as GEMINI_MODEL.
+GEMINI_MODEL = "gemini-flash-latest"
+WIKI_HEADERS = {"User-Agent": "SkySync/1.0 (satellite tracker; Streamlit app)"}
 
 # label -> NORAD catalog number
 TARGETS = {
@@ -31,29 +39,42 @@ TARGETS = {
     "Pixxel firefly 2": 62704,
     "Pixxel firefly 3": 62710,
     "Sentinel 3B": 43437,
+    "Landsat 9": 49260,
+    "Landsat 8": 39084,
+    "Vanguard 1": 5,  # written as 5, because Python does not allow 00005
+    "GOES-18": 51850,
+    "Cartosat 3": 44804,
+    "Aura": 28376,
 }
 
 # ---------------------------------------------------------------------------
-# YOUR DESCRIPTIONS: replace the text between the quotes for each satellite.
-# The name on the left must match the name in TARGETS above exactly.
-# Keep the comma at the end of every line.
+# MANUAL DESCRIPTIONS. A satellite listed here always uses this text.
+# A satellite NOT listed here (for example one you just added to TARGETS) gets
+# an AI-written description automatically the first time someone selects it.
+# Keep each description on one line, avoid double quotes inside, keep the comma.
 # ---------------------------------------------------------------------------
 DESCRIPTIONS = {
-    "ISS": "Description: The ISS is a large space station in low Earth orbit that serves as a laboratory for scientific research and technology experiments. It is operated through international cooperation and has been continuously inhabited since 2000.",
-    "HUBBLE": "Description: will add soon",
-    "CSS (Tianhe)": "Description: will add soon",
-    "Envisat": "Description: will add soon",
-    "TERRA": "Description: will add soon",
-    "Aqua": "Description: will add soon",
-    "NOAA 15": "Description: will add soon",
-    "NOAA 18": "Description: will add soon",
-    "NOAA 19": "Description: will add soon",
-    "Sentinel-1A": "Description: will add soon",
-    "Sentinel-2A": "Description: will add soon",
-    "Pixxel firefly 1": "Description: will add soon",
-    "Pixxel firefly 2": "Description: will add soon",
-    "Pixxel firefly 3": "Description: will add soon",
-    "Sentinel 3B": "Description: will add soon",
+    "ISS": "The International Space Station is a research laboratory built by five space agencies. People have lived aboard it continuously since November 2000, and it circles Earth about every 90 minutes at roughly 400 km up.",
+    "Hubble": "Launched in 1990, the Hubble Space Telescope is a joint NASA and ESA mission. Orbiting above the blurring effect of the atmosphere, it has captured some of the sharpest images of distant galaxies, nebulae and stars ever taken.",
+    "CSS (Tianhe)": "Tianhe is the core module of China's Tiangong space station, launched in April 2021. It provides living quarters and control systems for the crews who stay aboard and connects to the station's laboratory modules.",
+    "Envisat": "Launched by ESA in 2002, Envisat was the largest civilian Earth-observation satellite of its time, studying land, oceans, ice and the atmosphere. Contact was lost in 2012, and it now drifts in orbit as a defunct satellite.",
+    "Terra": "NASA's Terra, launched in December 1999, was the flagship of the Earth Observing System. Its instruments, including MODIS, track changes in land, oceans, clouds and air quality across the whole planet.",
+    "Aqua": "Launched by NASA in 2002, Aqua studies Earth's water cycle, including evaporation, clouds, rainfall, sea ice and snow cover. It flies in a close formation with other Earth-observing satellites known as the A-Train.",
+    "NOAA 15": "NOAA 15 is a polar-orbiting weather satellite launched in 1998. It passes over each region a few times a day, collecting cloud and temperature data, and its weather images have been picked up by amateur radio hobbyists.",
+    "NOAA 18": "NOAA 18 is a polar-orbiting weather satellite launched in 2005. Like its siblings, it scans the whole globe as Earth turns beneath it, supporting forecasting, storm tracking and climate records.",
+    "NOAA 19": "NOAA 19, launched in 2009, was the last of NOAA's older POES series of polar-orbiting weather satellites. It images clouds, measures temperatures and moisture, and supports search-and-rescue relays.",
+    "Sentinel-1A": "Sentinel-1A, launched in 2014 for the European Copernicus programme, carries a radar that can see the ground through clouds and in darkness. It is used to monitor floods, sea ice, ship traffic and ground movement.",
+    "Sentinel-2A": "Sentinel-2A, launched in 2015 for the Copernicus programme, takes high-resolution colour and infrared images of land. It is used to track crops, forests, coastlines and the effects of disasters.",
+    "Pixxel firefly 1": "Pixxel Firefly 1 is a hyperspectral imaging satellite built by Bengaluru-based Pixxel and launched in early 2025. Instead of ordinary colour photos, it records many narrow bands of light, which helps reveal crop health, minerals, pollution and water quality.",
+    "Pixxel firefly 2": "Pixxel Firefly 2 is one of three sister satellites in Pixxel's Firefly constellation, launched together in early 2025. Its hyperspectral camera splits sunlight reflected from the ground into many colours to spot details that normal cameras miss.",
+    "Pixxel firefly 3": "Pixxel Firefly 3 is part of the Firefly hyperspectral constellation built by Pixxel, an Indian space-data company. Data from satellites like this supports farming, mining, forestry and environmental monitoring.",
+    "Sentinel 3B": "Sentinel-3B, launched in 2018 for the European Copernicus programme, is the twin of Sentinel-3A. It measures sea-surface temperature, sea level, ocean colour and land conditions to monitor the health of oceans and coasts.",
+    "Landsat 9": "Landsat 9, launched in 2021 by NASA and the US Geological Survey, continues the longest continuous record of Earth's land seen from space, which began in 1972. Together with Landsat 8 it images the whole planet every eight days or so.",
+    "Landsat 8": "Landsat 8, launched in 2013 by NASA and the US Geological Survey, photographs Earth's land in visible, infrared and thermal light. Its images are free to use and help track forests, farmland, cities, glaciers and water supplies.",
+    "Vanguard 1": "Vanguard 1, a grapefruit-sized sphere launched by the United States in March 1958, is the oldest human-made object still in orbit. Measuring its path helped scientists learn that Earth is slightly pear-shaped.",
+    "GOES-18": "GOES-18, launched in 2022, is a NOAA weather satellite in geostationary orbit about 35,800 km up, so it stays over the same spot on Earth. It was placed to watch the western Americas and the Pacific, tracking storms, wildfires and lightning.",
+    "Cartosat 3": "Cartosat-3 is an Indian Earth-observation satellite launched by ISRO in November 2019. It takes very sharp images, with a reported ground detail of about 25 centimetres, used for city planning, mapping and infrastructure.",
+    "Aura": "NASA's Aura, launched in 2004, studies the chemistry of Earth's atmosphere, including the ozone layer, air quality and climate. It flies in the A-Train, a line of Earth-observing satellites that follow nearly the same track.",
 }
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -157,10 +178,141 @@ def positions(sats, sources):
                 "Speed (km/s)": round(speed, 2),
                 "Speed (km/h)": round(speed * 3600),
                 "TLE age (days)": round(now.tt - sat.epoch.tt, 1),
+                "Name in data": sat.name,
                 "Data": sources[label],
             }
         )
     return now, pd.DataFrame(rows)
+
+
+# ------------------------ automatic AI descriptions -------------------------
+GENERATED_FILE = os.path.join(CACHE_DIR, "generated_descriptions.json")
+
+
+def get_secret(name):
+    try:
+        value = st.secrets.get(name)
+    except Exception:
+        value = None
+    return value or os.environ.get(name)
+
+
+def launch_year(sat):
+    """Launch year from the international designator in the TLE (e.g. 98067A)."""
+    try:
+        yy = int(sat.model.intldesg.strip()[:2])
+        return 1900 + yy if yy >= 57 else 2000 + yy
+    except Exception:
+        return None
+
+
+def wiki_extract(label):
+    params = {
+        "action": "query", "generator": "search", "gsrsearch": f"{label} satellite",
+        "gsrlimit": 1, "prop": "extracts", "exintro": 1, "explaintext": 1,
+        "exsentences": 6, "redirects": 1, "format": "json",
+    }
+    r = requests.get(
+        "https://en.wikipedia.org/w/api.php",
+        params=params, headers=WIKI_HEADERS, timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+    pages = r.json().get("query", {}).get("pages", {})
+    if not pages:
+        return None, None
+    page = sorted(pages.values(), key=lambda p: p.get("index", 0))[0]
+    return page.get("title"), (page.get("extract") or "").strip()
+
+
+def first_sentences(text, n=2):
+    return " ".join(re.split(r"(?<=[.!?])\s+", text.strip())[:n])
+
+
+def gemini_write(label, catnr, year, wiki_title, wiki_text, key):
+    prompt = (
+        "Write a short description (2 sentences, at most 55 words) of the satellite "
+        "below for a public satellite-tracking website.\n"
+        "Rules: use only facts from the notes below; do not guess; do not say whether "
+        "the satellite is still operating unless the notes say so; plain text only, "
+        "no markdown and no quotation marks. If the Wikipedia text is not about this "
+        "satellite, ignore it and state only the basics.\n\n"
+        f"Satellite: {label}\n"
+        f"NORAD ID: {catnr}\n"
+        f"Launch year (from its international designator): {year or 'unknown'}\n"
+        f"Wikipedia page: {wiki_title or 'none'}\n"
+        f"Wikipedia text: {wiki_text or 'none'}"
+    )
+    model = get_secret("GEMINI_MODEL") or GEMINI_MODEL
+    r = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 800},
+        },
+        timeout=20,
+    )
+    r.raise_for_status()
+    parts = r.json()["candidates"][0]["content"]["parts"]
+    return " ".join(p.get("text", "") for p in parts).strip().replace('"', "")
+
+
+@st.cache_data(ttl=300, show_spinner=False)  # failures are retried after 5 minutes
+def _generate(label, catnr, year):
+    """Return (text, kind, note). kind is 'ai', 'wiki' or 'basic'."""
+    notes = []
+    wiki_title = wiki_text = None
+    try:
+        wiki_title, wiki_text = wiki_extract(label)
+    except Exception as e:
+        notes.append(f"wikipedia: {type(e).__name__}")
+
+    key = get_secret("GEMINI_API_KEY")
+    if key:
+        try:
+            out = gemini_write(label, catnr, year, wiki_title, wiki_text, key)
+            if out:
+                return out, "ai", ""
+            notes.append("gemini: empty answer")
+        except requests.HTTPError as e:
+            notes.append(f"gemini: HTTP {e.response.status_code}")
+        except Exception as e:
+            notes.append(f"gemini: {type(e).__name__}")
+    else:
+        notes.append("no GEMINI_API_KEY in Secrets")
+
+    if wiki_text:
+        return first_sentences(wiki_text, 2), "wiki", "; ".join(notes)
+    basic = f"{label} (NORAD ID {catnr})" + (f", launched in {year}." if year else ".")
+    return basic, "basic", "; ".join(notes)
+
+
+def load_generated():
+    try:
+        with open(GENERATED_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def get_description(label, catnr, year):
+    """Return (text, kind, note). Manual text wins, then saved AI text, then new AI text."""
+    manual = DESCRIPTIONS.get(label)
+    if manual and manual.strip():
+        return manual, "manual", ""
+    saved = load_generated().get(str(catnr))
+    if saved:
+        return saved, "ai", ""
+    text, kind, note = _generate(label, catnr, year)
+    if kind == "ai":  # only keep real AI text, so adding a key later upgrades the rest
+        store = load_generated()
+        store[str(catnr)] = text
+        try:
+            with open(GENERATED_FILE, "w") as f:
+                json.dump(store, f)
+        except Exception:
+            pass
+    return text, kind, note
 
 
 # --------------------------------- display ---------------------------------
@@ -238,7 +390,17 @@ def show_info(row):
         a, b = st.columns(2)
         a.metric("Longitude", f"{row['Lon (°)']:.4f}°")
         b.metric("Latitude", f"{row['Lat (°)']:.4f}°")
-        st.markdown(DESCRIPTIONS.get(label) or "No description yet.")
+        with st.spinner("Writing description..."):
+            text, kind, note = get_description(
+                label, int(row["NORAD ID"]), launch_year(satellites[label])
+            )
+        st.markdown(text)
+        if kind == "ai":
+            st.caption("✨ AI-generated description. It may contain errors.")
+        elif kind == "wiki":
+            st.caption("Summary from Wikipedia.")
+        if DEBUG and note:
+            st.caption(f"Description notes: {note}")
 
 
 # ----------------------------------- page ----------------------------------
@@ -257,7 +419,7 @@ if not satellites:
     st.stop()
 
 if DEBUG:
-    st.caption("version 4 · search + zoom")
+    st.caption("version 7 · 21 satellites")
     if errors:
         st.warning(
             "Could not load: " + ", ".join(f"{k} ({v})" for k, v in errors.items())
