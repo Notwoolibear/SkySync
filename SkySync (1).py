@@ -317,12 +317,35 @@ def get_description(label, catnr, year):
 
 
 # --------------------------------- display ---------------------------------
-def is_dark():
-    """True when the page theme is dark (change it in the menu: Settings > Theme)."""
+LIGHT_LABEL, DARK_LABEL = "☀️ Light", "🌙 Dark"
+
+# Flips the whole page between light and dark. The map is flipped back so it keeps
+# the colours chosen for it in PALETTES.
+FLIP_CSS = """<style>
+html { filter: invert(1) hue-rotate(180deg); }
+[data-testid="stPlotlyChart"] { filter: invert(1) hue-rotate(180deg); }
+</style>"""
+
+
+def native_theme():
+    """The theme Streamlit itself is showing (menu > Settings > Theme)."""
     try:
-        return st.context.theme.type != "light"
+        t = st.context.theme.type
+        if t in ("light", "dark"):
+            return t
     except Exception:
-        return True
+        pass
+    return "dark"  # matches the default set in .streamlit/config.toml
+
+
+def current_mode():
+    """The mode the visitor picked with the Light/Dark control, else the native one."""
+    choice = st.session_state.get("theme_choice")
+    if choice == LIGHT_LABEL:
+        return "light"
+    if choice == DARK_LABEL:
+        return "dark"
+    return native_theme()
 
 
 def split_at_dateline(lats, lons):
@@ -478,7 +501,7 @@ if not satellites:
     st.stop()
 
 if DEBUG:
-    st.caption("version 8 · path + theme + steady map")
+    st.caption("version 9 · light/dark choice")
     if errors:
         st.warning(
             "Could not load: " + ", ".join(f"{k} ({v})" for k, v in errors.items())
@@ -489,14 +512,27 @@ if "pending_search" in st.session_state:
     st.session_state["search"] = st.session_state.pop("pending_search")
 st.session_state.setdefault("map_version", 0)
 
-st.selectbox(
-    "Search satellites",
-    options=sorted(satellites, key=str.lower),
-    index=None,
-    placeholder="Search satellites…",
-    key="search",
-    label_visibility="collapsed",
-)
+search_col, theme_col = st.columns([4, 1])
+with search_col:
+    st.selectbox(
+        "Search satellites",
+        options=sorted(satellites, key=str.lower),
+        index=None,
+        placeholder="Search satellites…",
+        key="search",
+        label_visibility="collapsed",
+    )
+with theme_col:
+    st.segmented_control(
+        "Theme",
+        [LIGHT_LABEL, DARK_LABEL],
+        default=DARK_LABEL if native_theme() == "dark" else LIGHT_LABEL,
+        key="theme_choice",
+        label_visibility="collapsed",
+    )
+
+if current_mode() != native_theme():
+    st.markdown(FLIP_CSS, unsafe_allow_html=True)
 
 
 @st.fragment(run_every=REFRESH_SECONDS)
@@ -527,7 +563,7 @@ def live_view():
 
     with map_col:
         event = st.plotly_chart(
-            build_map(df, row, track, is_dark()),
+            build_map(df, row, track, current_mode() == "dark"),
             width="stretch",
             on_select="rerun",
             selection_mode="points",
