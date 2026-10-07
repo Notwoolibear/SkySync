@@ -4,6 +4,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import requests
@@ -316,42 +317,98 @@ def get_description(label, catnr, year):
 
 
 # --------------------------------- display ---------------------------------
-def build_map(df, row):
-    """World map with one dot per satellite. Zooms to `row` if one is chosen."""
+def is_dark():
+    """True when the page theme is dark (change it in the menu: Settings > Theme)."""
+    try:
+        return st.context.theme.type != "light"
+    except Exception:
+        return True
+
+
+def split_at_dateline(lats, lons):
+    """Insert gaps where a path wraps from +180 to -180 so no line crosses the map."""
+    out_lat, out_lon = [], []
+    for i in range(len(lats)):
+        if i > 0 and abs(lons[i] - lons[i - 1]) > 180:
+            out_lat.append(None)
+            out_lon.append(None)
+        out_lat.append(float(lats[i]))
+        out_lon.append(float(lons[i]))
+    return out_lat, out_lon
+
+
+def ground_track(sat, now, steps=240):
+    """Path on the ground (lat, lon lists) over the satellite's next full orbit."""
+    try:
+        minutes = 2 * math.pi / sat.model.no_kozai  # orbital period in minutes
+    except Exception:
+        minutes = 100.0
+    minutes = min(max(minutes, 60.0), 1500.0)
+    t = ts.tt_jd(now.tt + np.linspace(0, minutes / 1440.0, steps))
+    sp = wgs84.subpoint(sat.at(t))
+    return split_at_dateline(sp.latitude.degrees, sp.longitude.degrees)
+
+
+PALETTES = {
+    "dark": dict(land="#2b3a42", ocean="#0e1a22", borders="#46565e", text="#e8eef2",
+                 dot="#ff4d4d", chosen="#ffd166", outline="#ffffff"),
+    "light": dict(land="#e6e2d6", ocean="#cfe3f2", borders="#b5b0a2", text="#1b2733",
+                  dot="#d62828", chosen="#f77f00", outline="#1b2733"),
+}
+
+
+def build_map(df, row, track, dark):
+    """World map with one dot per satellite. Zooms to `row` and draws its path."""
+    p = PALETTES["dark" if dark else "light"]
     names = df["Satellite"].tolist()
     chosen = row["Satellite"] if row is not None else None
-    colors = ["#ffd166" if n == chosen else "#ff4d4d" for n in names]
+    colors = [p["chosen"] if n == chosen else p["dot"] for n in names]
     sizes = [16 if n == chosen else 11 for n in names]
 
-    fig = go.Figure(
+    fig = go.Figure()
+    # trace 0: dotted path (empty unless a satellite is chosen)
+    fig.add_trace(
+        go.Scattergeo(
+            lat=track[0], lon=track[1], mode="lines",
+            line=dict(width=2, dash="dot", color=p["chosen"]),
+            hoverinfo="skip", showlegend=False,
+        )
+    )
+    # trace 1: the satellites themselves (drawn on top of the path)
+    fig.add_trace(
         go.Scattergeo(
             lat=df["Lat (°)"],
             lon=df["Lon (°)"],
             text=names,
             mode="markers+text",
             textposition="top center",
-            textfont=dict(size=12, color="#e8eef2"),
-            marker=dict(size=sizes, color=colors, line=dict(width=1, color="white")),
+            textfont=dict(size=12, color=p["text"]),
+            marker=dict(size=sizes, color=colors, line=dict(width=1, color=p["outline"])),
             customdata=df[["Satellite", "Alt (km)"]].values.tolist(),
             hovertemplate="%{customdata[0]}<br>Alt: %{customdata[1]} km<extra></extra>",
+            showlegend=False,
         )
     )
     fig.update_geos(
         projection_type="natural earth",
-        showland=True,
-        landcolor="#2b3a42",
-        showocean=True,
-        oceancolor="#0e1a22",
-        showcountries=True,
-        countrycolor="#46565e",
-        showframe=False,
+        showland=True, landcolor=p["land"],
+        showocean=True, oceancolor=p["ocean"],
+        showcountries=True, countrycolor=p["borders"],
+        showframe=False, bgcolor="rgba(0,0,0,0)",
     )
     if row is not None:
         fig.update_geos(
             center=dict(lat=float(row["Lat (°)"]), lon=float(row["Lon (°)"])),
             projection_scale=ZOOM_SCALE,
         )
-    fig.update_layout(height=520, margin=dict(l=0, r=0, t=0, b=0))
+    # Keeps the view the visitor rotated or zoomed to across refreshes. The value
+    # changes when a different satellite is chosen, which resets the view on purpose.
+    revision = chosen or "world"
+    fig.update_layout(
+        height=520, margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor="rgba(0,0,0,0)", uirevision=revision,
+    )
+    fig.update_geos(uirevision=revision)
     return fig
 
 
@@ -364,6 +421,8 @@ def clicked_name(event, df):
     if not points:
         return None
     pt = points[0]
+    if pt.get("curve_number", 1) != 1:  # trace 0 is the dotted path, not a satellite
+        return None
     name = None
     cd = pt.get("customdata")
     if cd:
@@ -419,7 +478,7 @@ if not satellites:
     st.stop()
 
 if DEBUG:
-    st.caption("version 7 · 21 satellites")
+    st.caption("version 8 · path + theme + steady map")
     if errors:
         st.warning(
             "Could not load: " + ", ".join(f"{k} ({v})" for k, v in errors.items())
@@ -454,6 +513,13 @@ def live_view():
         if not match.empty:
             row = match.iloc[0]
 
+    track = ([], [])
+    if row is not None:
+        try:
+            track = ground_track(satellites[chosen], now)
+        except Exception:
+            pass  # no path is better than a broken page
+
     if row is not None:
         map_col, info_col = st.columns([3, 2])
     else:
@@ -461,10 +527,11 @@ def live_view():
 
     with map_col:
         event = st.plotly_chart(
-            build_map(df, row),
+            build_map(df, row, track, is_dark()),
             width="stretch",
             on_select="rerun",
             selection_mode="points",
+            config={"scrollZoom": True},
             key=f"map_{st.session_state.map_version}",
         )
 
