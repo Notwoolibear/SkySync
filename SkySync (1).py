@@ -20,8 +20,11 @@ ZOOM_SCALE = 5  # (unused now, the browser map sets its own zoom)
 # the featured list (TARGETS) below. Group names: celestrak.org/NORAD/elements
 # Avoid huge groups such as "starlink" or "active": thousands of dots make the map slow.
 # Keep this list the same as GROUPS in update_tles.py.
-GROUPS = ["stations", "visual", "weather", "noaa", "goes", "resource", "science"]
+GROUPS = ["stations", "visual", "weather", "goes", "resource", "science"]
 MAX_AUTO = 400  # most automatically added satellites to show
+
+# Major / famous satellites: these get the largest dots. Use the names from TARGETS.
+FAMOUS = ["ISS", "Hubble", "CSS (Tianhe)", "Vanguard 1", "Envisat", "Landsat 9", "Terra", "Aqua"]
 
 # Free AI descriptions (Google Gemini). The key is read from Streamlit Secrets,
 # never from this file. If the default model name stops working, put the current
@@ -421,19 +424,22 @@ function st(i,d){const pv=satellite.propagate(R[i],d);if(!pv.position)return nul
  const g=satellite.eciToGeodetic(pv.position,satellite.gstime(d)),v=pv.velocity;
  return{lat:satellite.degreesLat(g.latitude),lon:satellite.degreesLong(g.longitude),alt:g.height,v:Math.hypot(v.x,v.y,v.z)};}
 function track(i){let per=2*Math.PI/R[i].no;if(!(per>0))per=100;per=Math.min(Math.max(per,60),1500);
- const n=240,step=per/n*60000,now=Date.now(),base=Math.floor(now/step)*step,la=[],lo=[];
- const add=t=>{const c=st(i,new Date(t));if(c){la.push(c.lat);lo.push(c.lon);}};
+ const n=240,step=per/n*60000,now=Date.now(),base=Math.floor(now/step)*step,la=[],lo=[];let pa=null,po=null;
+ const add=t=>{const c=st(i,new Date(t));if(!c)return;
+  if(po!==null&&Math.abs(c.lon-po)>180){const e=c.lon<po?c.lon+360:c.lon-360,lim=c.lon<po?180:-180,f=(lim-po)/(e-po),y=pa+f*(c.lat-pa);
+   la.push(y,null,y);lo.push(lim,null,-lim);}
+  la.push(c.lat);lo.push(c.lon);pa=c.lat;po=c.lon;};
  for(let k=-Math.round(n/4);k<=n;k++){const t=base+k*step;if(t<now)add(t);}
  add(now);
  for(let k=0;k<=n;k++){const t=base+k*step;if(t>now)add(t);}
  return{la,lo};}
-const marks=()=>{const p=P[mode];return{'marker.color':[SATS.map((_,i)=>i===sel?p.sel:p.dot)],'marker.size':[SATS.map((x,i)=>i===sel?16:(x.top?11:7))],'text':[SATS.map((x,i)=>(x.top||i===sel)?x.name:'')]};};
+const marks=()=>{const p=P[mode];return{'marker.color':[SATS.map((_,i)=>i===sel?p.sel:p.dot)],'marker.size':[SATS.map((x,i)=>i===sel?22:(x.big?18:(x.top?11:7)))],'text':[SATS.map((x,i)=>i===sel?x.name:'')]};};
 const geo=()=>{const p=P[mode];return{projection:{type:'natural earth'},showland:true,landcolor:p.land,showocean:true,oceancolor:p.ocean,showcountries:true,countrycolor:p.bord,showframe:false,bgcolor:'rgba(0,0,0,0)'};};
 cur=SATS.map((_,i)=>st(i,new Date()));
 Plotly.newPlot(map,[
  {type:'scattergeo',mode:'lines',lat:[],lon:[],line:{width:2,dash:'dot',color:P.dark.sel},hoverinfo:'skip'},
- {type:'scattergeo',mode:'markers+text',lat:cur.map(c=>c&&c.lat),lon:cur.map(c=>c&&c.lon),text:SATS.map(s=>s.top?s.name:''),textposition:'top center',
-  textfont:{size:12,color:P.dark.text},marker:{size:SATS.map(s=>s.top?11:7),color:P.dark.dot,line:{width:1,color:P.dark.out}},
+ {type:'scattergeo',mode:'markers+text',lat:cur.map(c=>c&&c.lat),lon:cur.map(c=>c&&c.lon),text:SATS.map(()=>''),textposition:'top center',
+  textfont:{size:12,color:P.dark.text},marker:{size:SATS.map(s=>s.big?18:(s.top?11:7)),color:P.dark.dot,line:{width:1,color:P.dark.out}},
   customdata:cur.map((c,i)=>[SATS[i].name,c?Math.round(c.alt):null]),hovertemplate:'%{customdata[0]}<br>Alt: %{customdata[1]} km<extra></extra>'}],
  {geo:geo(),margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'rgba(0,0,0,0)',showlegend:false},
  {scrollZoom:true,displaylogo:false,responsive:true});
@@ -493,7 +499,7 @@ if not satellites:
     st.stop()
 
 if DEBUG:
-    st.caption(f"version 11 · {len(satellites)} satellites")
+    st.caption(f"version 12 · {len(satellites)} satellites")
     if errors:
         st.warning("Could not load: " + ", ".join(f"{k} ({v})" for k, v in errors.items()))
     st.dataframe(
@@ -512,7 +518,7 @@ with st.spinner("Preparing descriptions..."):
         else:  # automatically added ones: the browser looks up a Wikipedia summary
             text, kind = "", "none"
         payload.append(
-            {"name": label, "id": m["id"], "top": m["top"], "l1": tles[label][1],
+            {"name": label, "id": m["id"], "top": m["top"], "big": label in FAMOUS, "l1": tles[label][1],
              "l2": tles[label][2], "desc": text, "kind": kind}
         )
 
