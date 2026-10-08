@@ -20,8 +20,12 @@ ZOOM_SCALE = 5  # (unused now, the browser map sets its own zoom)
 # the featured list (TARGETS) below. Group names: celestrak.org/NORAD/elements
 # Avoid huge groups such as "starlink" or "active": thousands of dots make the map slow.
 # Keep this list the same as GROUPS in update_tles.py.
-GROUPS = ["stations", "visual", "weather", "goes", "resource", "science"]
-MAX_AUTO = 400  # most automatically added satellites to show
+GROUPS = [
+    "stations", "visual", "weather", "goes", "resource", "science",
+    "gps-ops", "galileo", "glo-ops", "beidou",   # navigation (GPS, Galileo, GLONASS, BeiDou)
+    "sarsat", "dmc", "geodetic", "engineering", "military",
+]
+MAX_AUTO = 800  # most automatically added satellites to show
 
 # Major / famous satellites: these get the largest dots. Use the names from TARGETS.
 FAMOUS = ["ISS", "Hubble", "CSS (Tianhe)", "Vanguard 1", "Envisat", "Landsat 9", "Terra", "Aqua"]
@@ -401,8 +405,8 @@ html,body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,sa
 .tg button:first-child{border-radius:8px 0 0 8px}.tg button:last-child{border-radius:0 8px 8px 0;border-left:0}
 .tg button.on{background:var(--acc);color:#111;border-color:var(--acc)}
 #main{display:flex;gap:10px;flex-wrap:wrap}
-#map{flex:3 1 480px;height:540px;min-width:0}
-#info{flex:2 1 280px;display:none;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;align-self:flex-start}
+#map{flex:3 1 480px;height:540px;min-width:0;overflow:hidden;position:relative}
+#info{flex:2 1 280px;position:relative;z-index:2;display:none;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;align-self:flex-start}
 #info h2{margin:0 0 10px;font-size:20px}
 .g{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px;margin-bottom:12px}
 .g small{display:block;opacity:.65;font-size:12px}.g b{font-size:17px}
@@ -444,6 +448,7 @@ Plotly.newPlot(map,[
  {geo:geo(),margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'rgba(0,0,0,0)',showlegend:false},
  {scrollZoom:true,displaylogo:false,responsive:true});
 map.on('plotly_click',e=>{const p=e.points&&e.points[0];if(p&&p.curveNumber===1)pick(p.pointIndex);});
+new ResizeObserver(()=>Plotly.Plots.resize(map)).observe(map);
 function nums(){const c=cur[sel];if(!c||!$('vA'))return;
  $('vA').textContent=c.alt.toFixed(1)+' km';$('vS').textContent=c.v.toFixed(2)+' km/s';
  $('vH').textContent=Math.round(c.v*3600).toLocaleString()+' km/h';
@@ -464,7 +469,7 @@ function drawTrack(){const t=track(sel);Plotly.restyle(map,{lat:[t.la],lon:[t.lo
 function pick(i){sel=i;q.value=i>=0?SATS[i].name:'';clr.style.display=i>=0?'block':'none';res.style.display='none';
  Plotly.restyle(map,marks(),[1]);
  const rot={'geo.projection.rotation.lon':0,'geo.projection.rotation.lat':0,'geo.projection.rotation.roll':0};
- if(i>=0&&cur[i]){drawTrack();Plotly.relayout(map,Object.assign({'geo.center.lat':cur[i].lat,'geo.center.lon':cur[i].lon,'geo.projection.scale':5},rot));show();}
+ if(i>=0&&cur[i]){drawTrack();Plotly.relayout(map,Object.assign({'geo.center.lat':cur[i].lat,'geo.center.lon':cur[i].lon,'geo.projection.scale':5},rot));show();info.scrollIntoView({block:'nearest'});}
  else{Plotly.restyle(map,{lat:[[]],lon:[[]]},[0]);Plotly.relayout(map,Object.assign({'geo.center.lat':0,'geo.center.lon':0,'geo.projection.scale':1},rot));info.style.display='none';}}
 function list(){const t=q.value.trim().toLowerCase();res.innerHTML='';let n=0;
  SATS.forEach((s,i)=>{if(n>=60||!s.name.toLowerCase().startsWith(t))return;n++;const d=document.createElement('div');d.textContent=s.name;
@@ -499,7 +504,7 @@ if not satellites:
     st.stop()
 
 if DEBUG:
-    st.caption(f"version 12 · {len(satellites)} satellites")
+    st.caption(f"version 13 · {len(satellites)} satellites")
     if errors:
         st.warning("Could not load: " + ", ".join(f"{k} ({v})" for k, v in errors.items()))
     st.dataframe(
