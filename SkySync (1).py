@@ -4,18 +4,24 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from skyfield.api import EarthSatellite, load, wgs84
 
 st.set_page_config(page_title="SkySync", layout="wide")
 
 REFRESH_SECONDS = 5
 TIMEOUT = 8  # seconds per download attempt
-ZOOM_SCALE = 5  # how far the map zooms in on a chosen satellite
+ZOOM_SCALE = 5  # (unused now, the browser map sets its own zoom)
+
+# Satellites are added AUTOMATICALLY from these NORAD/CelesTrak groups, on top of
+# the featured list (TARGETS) below. Group names: celestrak.org/NORAD/elements
+# Avoid huge groups such as "starlink" or "active": thousands of dots make the map slow.
+# Keep this list the same as GROUPS in update_tles.py.
+GROUPS = ["stations", "visual", "weather", "noaa", "goes", "resource", "science"]
+MAX_AUTO = 400  # most automatically added satellites to show
 
 # Free AI descriptions (Google Gemini). The key is read from Streamlit Secrets,
 # never from this file. If the default model name stops working, put the current
@@ -141,20 +147,75 @@ def fetch_one(label, catnr):
     return label, None, None, "; ".join(errors)
 
 
+def fetch_group(group):
+    """Every satellite in a CelesTrak group: live, else a saved copy. {catnr: tle}"""
+    path = os.path.join(CACHE_DIR, f"group_{group}.tle")
+    try:
+        r = requests.get(
+            f"https://celestrak.org/NORAD/elements/gp.php?GROUP={group}&FORMAT=tle",
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        found = parse_tle_text(r.text)
+        if found:
+            with open(path, "w") as f:
+                f.write(r.text)
+            return found
+    except Exception:
+        pass
+    try:
+        with open(path) as f:
+            return parse_tle_text(f.read())
+    except Exception:
+        return {}
+
+
 @st.cache_resource(ttl=6 * 3600, show_spinner=False)
 def load_all():
-    with ThreadPoolExecutor(max_workers=len(TARGETS)) as pool:
-        results = list(pool.map(lambda kv: fetch_one(*kv), TARGETS.items()))
+    with ThreadPoolExecutor(max_workers=len(TARGETS) + len(GROUPS)) as pool:
+        feat_jobs = [pool.submit(fetch_one, l, c) for l, c in TARGETS.items()]
+        grp_jobs = [pool.submit(fetch_group, g) for g in GROUPS]
+        featured = [j.result() for j in feat_jobs]
+        groups = [j.result() for j in grp_jobs]
 
-    sats, sources, errors = {}, {}, {}
-    for label, tle, source, err in results:
+    found = {}
+    for g in groups:
+        found.update(g)
+    try:  # tles.txt from update_tles.py fills in whatever could not be downloaded
+        with open(BUNDLED) as f:
+            for k, v in parse_tle_text(f.read()).items():
+                found.setdefault(k, v)
+    except Exception:
+        pass
+
+    sats, sources, errors, tles, meta = {}, {}, {}, {}, {}
+    for label, tle, source, err in featured:
         if tle is None:
             errors[label] = err
             continue
         name, l1, l2 = tle
         sats[label] = EarthSatellite(l1, l2, name or label, ts)
-        sources[label] = source
-    return sats, sources, errors
+        sources[label], tles[label] = source, tle
+        meta[label] = {"id": TARGETS[label], "top": True}
+
+    have = {m["id"] for m in meta.values()}
+    auto = []
+    for catnr, (name, l1, l2) in found.items():
+        if catnr in have:
+            continue
+        label = (name or f"SAT {catnr}").strip()
+        auto.append((label, catnr, name, l1, l2))
+    auto.sort(key=lambda x: x[0].lower())
+    for label, catnr, name, l1, l2 in auto[:MAX_AUTO]:
+        if label in sats:
+            label = f"{label} ({catnr})"
+        try:
+            sats[label] = EarthSatellite(l1, l2, name or label, ts)
+        except Exception:
+            continue
+        sources[label], tles[label] = "auto", (name, l1, l2)
+        meta[label] = {"id": catnr, "top": False}
+    return sats, sources, errors, tles, meta
 
 
 # ------------------------------ calculations -------------------------------
@@ -316,182 +377,113 @@ def get_description(label, catnr, year):
     return text, kind, note
 
 
-# --------------------------------- display ---------------------------------
-LIGHT_LABEL, DARK_LABEL = "☀️ Light", "🌙 Dark"
-
-# Flips the whole page between light and dark. The map is flipped back so it keeps
-# the colours chosen for it in PALETTES.
-FLIP_CSS = """<style>
-html { filter: invert(1) hue-rotate(180deg); }
-[data-testid="stPlotlyChart"] { filter: invert(1) hue-rotate(180deg); }
-</style>"""
-
-
-def native_theme():
-    """The theme Streamlit itself is showing (menu > Settings > Theme)."""
-    try:
-        t = st.context.theme.type
-        if t in ("light", "dark"):
-            return t
-    except Exception:
-        pass
-    return "dark"  # matches the default set in .streamlit/config.toml
-
-
-def current_mode():
-    """The mode the visitor picked with the Light/Dark control, else the native one."""
-    choice = st.session_state.get("theme_choice")
-    if choice == LIGHT_LABEL:
-        return "light"
-    if choice == DARK_LABEL:
-        return "dark"
-    return native_theme()
-
-
-def split_at_dateline(lats, lons):
-    """Insert gaps where a path wraps from +180 to -180 so no line crosses the map."""
-    out_lat, out_lon = [], []
-    for i in range(len(lats)):
-        if i > 0 and abs(lons[i] - lons[i - 1]) > 180:
-            out_lat.append(None)
-            out_lon.append(None)
-        out_lat.append(float(lats[i]))
-        out_lon.append(float(lons[i]))
-    return out_lat, out_lon
-
-
-def ground_track(sat, now, steps=240):
-    """Path on the ground (lat, lon lists) over the satellite's next full orbit."""
-    try:
-        minutes = 2 * math.pi / sat.model.no_kozai  # orbital period in minutes
-    except Exception:
-        minutes = 100.0
-    minutes = min(max(minutes, 60.0), 1500.0)
-    t = ts.tt_jd(now.tt + np.linspace(0, minutes / 1440.0, steps))
-    sp = wgs84.subpoint(sat.at(t))
-    return split_at_dateline(sp.latitude.degrees, sp.longitude.degrees)
-
-
-PALETTES = {
-    "dark": dict(land="#2b3a42", ocean="#0e1a22", borders="#46565e", text="#e8eef2",
-                 dot="#ff4d4d", chosen="#ffd166", outline="#ffffff"),
-    "light": dict(land="#e6e2d6", ocean="#cfe3f2", borders="#b5b0a2", text="#1b2733",
-                  dot="#d62828", chosen="#f77f00", outline="#1b2733"),
-}
-
-
-def build_map(df, row, track, dark):
-    """World map with one dot per satellite. Zooms to `row` and draws its path."""
-    p = PALETTES["dark" if dark else "light"]
-    names = df["Satellite"].tolist()
-    chosen = row["Satellite"] if row is not None else None
-    colors = [p["chosen"] if n == chosen else p["dot"] for n in names]
-    sizes = [16 if n == chosen else 11 for n in names]
-
-    fig = go.Figure()
-    # trace 0: dotted path (empty unless a satellite is chosen)
-    fig.add_trace(
-        go.Scattergeo(
-            lat=track[0], lon=track[1], mode="lines",
-            line=dict(width=2, dash="dot", color=p["chosen"]),
-            hoverinfo="skip", showlegend=False,
-        )
-    )
-    # trace 1: the satellites themselves (drawn on top of the path)
-    fig.add_trace(
-        go.Scattergeo(
-            lat=df["Lat (°)"],
-            lon=df["Lon (°)"],
-            text=names,
-            mode="markers+text",
-            textposition="top center",
-            textfont=dict(size=12, color=p["text"]),
-            marker=dict(size=sizes, color=colors, line=dict(width=1, color=p["outline"])),
-            customdata=df[["Satellite", "Alt (km)"]].values.tolist(),
-            hovertemplate="%{customdata[0]}<br>Alt: %{customdata[1]} km<extra></extra>",
-            showlegend=False,
-        )
-    )
-    fig.update_geos(
-        projection_type="natural earth",
-        showland=True, landcolor=p["land"],
-        showocean=True, oceancolor=p["ocean"],
-        showcountries=True, countrycolor=p["borders"],
-        showframe=False, bgcolor="rgba(0,0,0,0)",
-    )
-    if row is not None:
-        fig.update_geos(
-            center=dict(lat=float(row["Lat (°)"]), lon=float(row["Lon (°)"])),
-            projection_scale=ZOOM_SCALE,
-        )
-    # Keeps the view the visitor rotated or zoomed to across refreshes. The value
-    # changes when a different satellite is chosen, which resets the view on purpose.
-    revision = chosen or "world"
-    fig.update_layout(
-        height=520, margin=dict(l=0, r=0, t=0, b=0),
-        paper_bgcolor="rgba(0,0,0,0)", uirevision=revision,
-    )
-    fig.update_geos(uirevision=revision)
-    return fig
-
-
-def clicked_name(event, df):
-    """Name of the satellite whose dot was clicked, or None."""
-    try:
-        points = event["selection"]["points"]
-    except Exception:
-        return None
-    if not points:
-        return None
-    pt = points[0]
-    if pt.get("curve_number", 1) != 1:  # trace 0 is the dotted path, not a satellite
-        return None
-    name = None
-    cd = pt.get("customdata")
-    if cd:
-        name = cd[0] if isinstance(cd, (list, tuple)) else cd
-    if name is None and pt.get("point_index") is not None:
-        idx = pt["point_index"]
-        if 0 <= idx < len(df):
-            name = df.iloc[idx]["Satellite"]
-    if name is None:
-        name = pt.get("text")
-    return name if name in TARGETS else None
-
-
-def show_info(row):
-    label = row["Satellite"]
-    with st.container(border=True):
-        st.subheader(label)
-        a, b = st.columns(2)
-        a.metric("NORAD ID", str(int(row["NORAD ID"])))
-        b.metric("Altitude", f"{row['Alt (km)']:,.1f} km")
-        a, b = st.columns(2)
-        a.metric("Speed", f"{row['Speed (km/s)']:.2f} km/s")
-        b.metric("Speed", f"{int(row['Speed (km/h)']):,} km/h")
-        a, b = st.columns(2)
-        a.metric("Longitude", f"{row['Lon (°)']:.4f}°")
-        b.metric("Latitude", f"{row['Lat (°)']:.4f}°")
-        with st.spinner("Writing description..."):
-            text, kind, note = get_description(
-                label, int(row["NORAD ID"]), launch_year(satellites[label])
-            )
-        st.markdown(text)
-        if kind == "ai":
-            st.caption("✨ AI-generated description. It may contain errors.")
-        elif kind == "wiki":
-            st.caption("Summary from Wikipedia.")
-        if DEBUG and note:
-            st.caption(f"Description notes: {note}")
-
-
 # ----------------------------------- page ----------------------------------
+# The map, search, details card and light/dark switch all run in the visitor's
+# browser (WIDGET_HTML below). Streamlit only hands it the data once, so nothing
+# refreshes the map and the view the visitor rotated to is never reset.
+WIDGET_HTML = r'''<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#0e1117;--fg:#e8eef2;--card:#1a1f2b;--line:#2f3645;--acc:#ffd166}
+body.light{--bg:#f6f4ee;--fg:#1b2733;--card:#fff;--line:#d8d3c4;--acc:#f77f00}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif}
+#top{display:flex;gap:8px;padding:2px 2px 8px}
+#sw{position:relative;flex:1}
+#q{width:100%;padding:10px 34px 10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);font-size:15px}
+#clr{position:absolute;right:8px;top:6px;border:0;background:none;color:var(--fg);font-size:20px;cursor:pointer;display:none}
+#res{position:absolute;z-index:10;left:0;right:0;top:44px;background:var(--card);border:1px solid var(--line);border-radius:8px;max-height:240px;overflow:auto;display:none}
+#res div{padding:8px 12px;cursor:pointer}#res div:hover{background:var(--line)}
+.tg button{padding:10px 12px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer;font-size:14px}
+.tg button:first-child{border-radius:8px 0 0 8px}.tg button:last-child{border-radius:0 8px 8px 0;border-left:0}
+.tg button.on{background:var(--acc);color:#111;border-color:var(--acc)}
+#main{display:flex;gap:10px;flex-wrap:wrap}
+#map{flex:3 1 480px;height:540px;min-width:0}
+#info{flex:2 1 280px;display:none;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;align-self:flex-start}
+#info h2{margin:0 0 10px;font-size:20px}
+.g{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px;margin-bottom:12px}
+.g small{display:block;opacity:.65;font-size:12px}.g b{font-size:17px}
+#desc{line-height:1.45;font-size:14px}#kind{opacity:.6;font-size:12px;margin-top:8px}
+</style></head><body>
+<div id="top"><div id="sw"><input id="q" placeholder="Search satellites…" autocomplete="off"><button id="clr" title="Clear">×</button><div id="res"></div></div>
+<div class="tg"><button id="bl">☀️ Light</button><button id="bd" class="on">🌙 Dark</button></div></div>
+<div id="main"><div id="map"></div><div id="info"></div></div>
+<script src="https://cdn.jsdelivr.net/npm/satellite.js@4.1.3/dist/satellite.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+<script>
+const SATS=__DATA__;
+const P={dark:{land:'#2b3a42',ocean:'#0e1a22',bord:'#46565e',text:'#e8eef2',dot:'#ff4d4d',sel:'#ffd166',out:'#fff'},
+light:{land:'#e6e2d6',ocean:'#cfe3f2',bord:'#b5b0a2',text:'#1b2733',dot:'#d62828',sel:'#f77f00',out:'#1b2733'}};
+let mode='dark',sel=-1,cur=[];
+const R=SATS.map(s=>satellite.twoline2satrec(s.l1,s.l2));
+const $=id=>document.getElementById(id),q=$('q'),res=$('res'),clr=$('clr'),info=$('info'),map=$('map');
+function st(i,d){const pv=satellite.propagate(R[i],d);if(!pv.position)return null;
+ const g=satellite.eciToGeodetic(pv.position,satellite.gstime(d)),v=pv.velocity;
+ return{lat:satellite.degreesLat(g.latitude),lon:satellite.degreesLong(g.longitude),alt:g.height,v:Math.hypot(v.x,v.y,v.z)};}
+function track(i){let per=2*Math.PI/R[i].no;if(!(per>0))per=100;per=Math.min(Math.max(per,60),1500);
+ const n=240,step=per/n*60000,now=Date.now(),base=Math.floor(now/step)*step,la=[],lo=[];
+ const add=t=>{const c=st(i,new Date(t));if(c){la.push(c.lat);lo.push(c.lon);}};
+ for(let k=-Math.round(n/4);k<=n;k++){const t=base+k*step;if(t<now)add(t);}
+ add(now);
+ for(let k=0;k<=n;k++){const t=base+k*step;if(t>now)add(t);}
+ return{la,lo};}
+const marks=()=>{const p=P[mode];return{'marker.color':[SATS.map((_,i)=>i===sel?p.sel:p.dot)],'marker.size':[SATS.map((x,i)=>i===sel?16:(x.top?11:7))],'text':[SATS.map((x,i)=>(x.top||i===sel)?x.name:'')]};};
+const geo=()=>{const p=P[mode];return{projection:{type:'natural earth'},showland:true,landcolor:p.land,showocean:true,oceancolor:p.ocean,showcountries:true,countrycolor:p.bord,showframe:false,bgcolor:'rgba(0,0,0,0)'};};
+cur=SATS.map((_,i)=>st(i,new Date()));
+Plotly.newPlot(map,[
+ {type:'scattergeo',mode:'lines',lat:[],lon:[],line:{width:2,dash:'dot',color:P.dark.sel},hoverinfo:'skip'},
+ {type:'scattergeo',mode:'markers+text',lat:cur.map(c=>c&&c.lat),lon:cur.map(c=>c&&c.lon),text:SATS.map(s=>s.top?s.name:''),textposition:'top center',
+  textfont:{size:12,color:P.dark.text},marker:{size:SATS.map(s=>s.top?11:7),color:P.dark.dot,line:{width:1,color:P.dark.out}},
+  customdata:cur.map((c,i)=>[SATS[i].name,c?Math.round(c.alt):null]),hovertemplate:'%{customdata[0]}<br>Alt: %{customdata[1]} km<extra></extra>'}],
+ {geo:geo(),margin:{l:0,r:0,t:0,b:0},paper_bgcolor:'rgba(0,0,0,0)',showlegend:false},
+ {scrollZoom:true,displaylogo:false,responsive:true});
+map.on('plotly_click',e=>{const p=e.points&&e.points[0];if(p&&p.curveNumber===1)pick(p.pointIndex);});
+function nums(){const c=cur[sel];if(!c||!$('vA'))return;
+ $('vA').textContent=c.alt.toFixed(1)+' km';$('vS').textContent=c.v.toFixed(2)+' km/s';
+ $('vH').textContent=Math.round(c.v*3600).toLocaleString()+' km/h';
+ $('vO').textContent=c.lon.toFixed(4)+'°';$('vL').textContent=c.lat.toFixed(4)+'°';}
+function show(){const s=SATS[sel];info.style.display='block';
+ info.innerHTML='<h2 id="nm"></h2><div class="g"><div><small>NORAD ID</small><b>'+s.id+'</b></div><div><small>Altitude</small><b id="vA"></b></div><div><small>Speed</small><b id="vS"></b></div><div><small>Speed</small><b id="vH"></b></div><div><small>Longitude</small><b id="vO"></b></div><div><small>Latitude</small><b id="vL"></b></div></div><div id="desc"></div><div id="kind"></div>';
+ $('nm').textContent=s.name;$('desc').textContent=s.desc;
+ $('kind').textContent=s.kind==='ai'?'✨ AI-generated description. It may contain errors.':s.kind==='wiki'?'Summary from Wikipedia'+(s.wt?' ('+s.wt+')':'')+'. It may not match this exact satellite.':'';
+ nums();if(s.kind==='none')wiki(s,sel);}
+function yr(s){const y=parseInt(s.l1.substring(9,17).trim().substring(0,2));return isNaN(y)?null:(y>=57?1900+y:2000+y);}
+function wiki(s,i){const y=yr(s);s.desc=s.name+' (NORAD ID '+s.id+')'+(y?', launched in '+y+'.':'.');
+ $('desc').textContent=s.desc;$('kind').textContent='Looking for a Wikipedia summary…';
+ fetch('https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrlimit=1&prop=extracts&exintro=1&explaintext=1&exsentences=3&redirects=1&format=json&origin=*&gsrsearch='+encodeURIComponent(s.name.replace(/\(.*?\)/g,'')+' satellite'))
+ .then(r=>r.json()).then(j=>{const pg=Object.values((j.query||{}).pages||{})[0];
+  if(pg&&pg.extract){s.desc=pg.extract;s.kind='wiki';s.wt=pg.title;}else s.kind='basic';
+  if(sel===i)show();}).catch(()=>{s.kind='basic';if(sel===i)show();});}
+function drawTrack(){const t=track(sel);Plotly.restyle(map,{lat:[t.la],lon:[t.lo]},[0]);}
+function pick(i){sel=i;q.value=i>=0?SATS[i].name:'';clr.style.display=i>=0?'block':'none';res.style.display='none';
+ Plotly.restyle(map,marks(),[1]);
+ const rot={'geo.projection.rotation.lon':0,'geo.projection.rotation.lat':0,'geo.projection.rotation.roll':0};
+ if(i>=0&&cur[i]){drawTrack();Plotly.relayout(map,Object.assign({'geo.center.lat':cur[i].lat,'geo.center.lon':cur[i].lon,'geo.projection.scale':5},rot));show();}
+ else{Plotly.restyle(map,{lat:[[]],lon:[[]]},[0]);Plotly.relayout(map,Object.assign({'geo.center.lat':0,'geo.center.lon':0,'geo.projection.scale':1},rot));info.style.display='none';}}
+function list(){const t=q.value.trim().toLowerCase();res.innerHTML='';let n=0;
+ SATS.forEach((s,i)=>{if(n>=60||!s.name.toLowerCase().startsWith(t))return;n++;const d=document.createElement('div');d.textContent=s.name;
+  d.onmousedown=e=>{e.preventDefault();pick(i);};res.appendChild(d);});
+ res.style.display=n?'block':'none';}
+q.oninput=list;q.onfocus=list;q.onblur=()=>setTimeout(()=>{res.style.display='none';},150);
+q.onkeydown=e=>{if(e.key==='Enter'){const t=q.value.trim().toLowerCase(),i=SATS.findIndex(s=>s.name.toLowerCase().startsWith(t));if(i>=0)pick(i);}};
+clr.onclick=()=>pick(-1);
+function setMode(m){mode=m;document.body.className=m==='light'?'light':'';$('bl').className=m==='light'?'on':'';$('bd').className=m==='dark'?'on':'';
+ const p=P[m];Plotly.relayout(map,{'geo.landcolor':p.land,'geo.oceancolor':p.ocean,'geo.countrycolor':p.bord});
+ Plotly.restyle(map,Object.assign({'textfont.color':[p.text],'marker.line.color':[p.out]},marks()),[1]);
+ Plotly.restyle(map,{'line.color':[p.sel]},[0]);}
+$('bl').onclick=()=>setMode('light');$('bd').onclick=()=>setMode('dark');
+setInterval(()=>{const d=new Date();cur=SATS.map((_,i)=>st(i,d));
+ Plotly.restyle(map,{lat:[cur.map(c=>c&&c.lat)],lon:[cur.map(c=>c&&c.lon)],customdata:[cur.map((c,i)=>[SATS[i].name,c?Math.round(c.alt):null])]},[1]);nums();},1000);
+setInterval(()=>{if(sel>=0)drawTrack();},5000);
+</script></body></html>
+'''
+
 DEBUG = "debug" in st.query_params  # open your link with ?debug=1 to see data status
 
 st.title("🛰️ SkySync")
 
 with st.spinner("Loading orbital data (up to ~20 seconds)..."):
-    satellites, sources, errors = load_all()
+    satellites, sources, errors, tles, meta = load_all()
 
 if not satellites:
     st.error(
@@ -501,89 +493,28 @@ if not satellites:
     st.stop()
 
 if DEBUG:
-    st.caption("version 9 · light/dark choice")
+    st.caption(f"version 11 · {len(satellites)} satellites")
     if errors:
-        st.warning(
-            "Could not load: " + ", ".join(f"{k} ({v})" for k, v in errors.items())
-        )
-
-# A click on a dot sets this, and it is applied to the search box before it is drawn.
-if "pending_search" in st.session_state:
-    st.session_state["search"] = st.session_state.pop("pending_search")
-st.session_state.setdefault("map_version", 0)
-
-search_col, theme_col = st.columns([4, 1])
-with search_col:
-    st.selectbox(
-        "Search satellites",
-        options=sorted(satellites, key=str.lower),
-        index=None,
-        placeholder="Search satellites…",
-        key="search",
-        label_visibility="collapsed",
-    )
-with theme_col:
-    st.segmented_control(
-        "Theme",
-        [LIGHT_LABEL, DARK_LABEL],
-        default=DARK_LABEL if native_theme() == "dark" else LIGHT_LABEL,
-        key="theme_choice",
-        label_visibility="collapsed",
+        st.warning("Could not load: " + ", ".join(f"{k} ({v})" for k, v in errors.items()))
+    st.dataframe(
+        pd.DataFrame(
+            [{"Satellite": k, "Name in data": tles[k][0], "Data": sources[k]} for k in satellites]
+        ),
+        hide_index=True,
     )
 
-if current_mode() != native_theme():
-    st.markdown(FLIP_CSS, unsafe_allow_html=True)
-
-
-@st.fragment(run_every=REFRESH_SECONDS)
-def live_view():
-    now, df = positions(satellites, sources)
-    if df.empty:
-        st.error("No positions could be calculated.")
-        return
-
-    row = None
-    chosen = st.session_state.get("search")
-    if chosen:
-        match = df[df["Satellite"] == chosen]
-        if not match.empty:
-            row = match.iloc[0]
-
-    track = ([], [])
-    if row is not None:
-        try:
-            track = ground_track(satellites[chosen], now)
-        except Exception:
-            pass  # no path is better than a broken page
-
-    if row is not None:
-        map_col, info_col = st.columns([3, 2])
-    else:
-        map_col, info_col = st.container(), None
-
-    with map_col:
-        event = st.plotly_chart(
-            build_map(df, row, track, current_mode() == "dark"),
-            width="stretch",
-            on_select="rerun",
-            selection_mode="points",
-            config={"scrollZoom": True},
-            key=f"map_{st.session_state.map_version}",
+payload = []
+with st.spinner("Preparing descriptions..."):
+    for label, sat in satellites.items():
+        m = meta[label]
+        if m["top"]:  # your featured satellites: written text, else AI / Wikipedia
+            text, kind, note = get_description(label, m["id"], launch_year(sat))
+        else:  # automatically added ones: the browser looks up a Wikipedia summary
+            text, kind = "", "none"
+        payload.append(
+            {"name": label, "id": m["id"], "top": m["top"], "l1": tles[label][1],
+             "l2": tles[label][2], "desc": text, "kind": kind}
         )
 
-    clicked = clicked_name(event, df)
-    if clicked:
-        st.session_state["pending_search"] = clicked
-        st.session_state.map_version += 1  # fresh chart, so the click isn't reused
-        st.rerun()
-
-    if info_col is not None:
-        with info_col:
-            show_info(row)
-
-    if DEBUG:
-        st.caption(f"Last updated: {now.utc_strftime('%Y-%m-%d %H:%M:%S')} UTC")
-        st.dataframe(df, hide_index=True, width="stretch")
-
-
-live_view()
+data_json = json.dumps(payload).replace("</", "<\\/")
+components.html(WIDGET_HTML.replace("__DATA__", data_json), height=780, scrolling=True)
