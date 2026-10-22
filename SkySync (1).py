@@ -24,8 +24,11 @@ GROUPS = [
     "stations", "visual", "weather", "goes", "resource", "science",
     "gps-ops", "galileo", "glo-ops", "beidou",   # navigation (GPS, Galileo, GLONASS, BeiDou)
     "sarsat", "dmc", "geodetic", "engineering", "military",
+    "planet", "spire", "cubesat", "amateur", "education", "radar",   # imaging, small satellites, radio
+    "iridium-NEXT", "globalstar", "orbcomm", "intelsat", "ses",      # communications
+    "sbas", "musson",                                                # navigation aids
 ]
-MAX_AUTO = 800  # most automatically added satellites to show
+MAX_AUTO = 1500  # most automatically added satellites to show
 
 # Major / famous satellites: these get the largest dots. Use the names from TARGETS.
 FAMOUS = ["ISS", "Hubble", "CSS (Tianhe)", "Vanguard 1", "Envisat", "Landsat 9", "Terra", "Aqua"]
