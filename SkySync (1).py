@@ -30,7 +30,7 @@ GROUPS = [
     "sar", "tdrss", "argos", "eutelsat", "telesat", "qianfan",       # more radar / relay / communications
     "hulianwang", "kuiper", "satnogs", "x-comm", "other-comm",
     "active",   # ALL active satellites (~15,000, includes Starlink, OneWeb and geostationary)
-    "analyst", "last-30-days",                                       # unidentified / newly launched objects
+    "analyst",                                      # unidentified / newly launched objects
     "fengyun-1c-debris", "iridium-33-debris", "cosmos-2251-debris",  # debris clouds (shown in grey)
 ]
 MAX_TOTAL = 20000  # most satellites on the map. If there are more, the groups at the END of GROUPS are cut first.
