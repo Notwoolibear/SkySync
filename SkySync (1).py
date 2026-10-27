@@ -27,12 +27,25 @@ GROUPS = [
     "planet", "spire", "cubesat", "amateur", "education", "radar",   # imaging, small satellites, radio
     "iridium-NEXT", "globalstar", "orbcomm", "intelsat", "ses",      # communications
     "sbas", "musson",                                                # navigation aids
+    "sar", "tdrss", "argos", "eutelsat", "telesat", "qianfan",       # more radar / relay / communications
+    "hulianwang", "kuiper", "satnogs", "x-comm", "other-comm",
     "active",   # ALL active satellites (~15,000, includes Starlink, OneWeb and geostationary)
+    "analyst", "last-30-days",                                       # unidentified / newly launched objects
+    "fengyun-1c-debris", "iridium-33-debris", "cosmos-2251-debris",  # debris clouds (shown in grey)
 ]
-MAX_AUTO = 30000  # most automatically added satellites to show
+MAX_TOTAL = 20000  # most satellites on the map. If there are more, the groups at the END of GROUPS are cut first.
 
-# Major / famous satellites: these get the largest dots. Use the names from TARGETS.
-FAMOUS = ["ISS", "Hubble", "CSS (Tianhe)", "Vanguard 1", "Envisat", "Landsat 9", "Terra", "Aqua"]
+# Major / famous satellites: ONLY these get the large dots. Add or remove NORAD IDs.
+FAMOUS_IDS = {
+    25544,  # ISS
+    20580,  # Hubble
+    48274,  # CSS (Tianhe)
+    5,      # Vanguard 1
+    27386,  # Envisat
+    49260,  # Landsat 9
+    25994,  # Terra
+    27424,  # Aqua
+}
 
 # Free AI descriptions (Google Gemini). The key is read from Streamlit Secrets,
 # never from this file. If the default model name stops working, put the current
@@ -216,9 +229,10 @@ def load_all():
             continue
         label = (name or f"SAT {catnr}").strip()
         auto.append((label, catnr, name, l1, l2))
+    auto = auto[: max(0, MAX_TOTAL - len(meta))]  # found is in GROUPS order, so debris is cut first
     auto.sort(key=lambda x: x[0].lower())
     used = set(sats)
-    for label, catnr, name, l1, l2 in auto[:MAX_AUTO]:
+    for label, catnr, name, l1, l2 in auto:
         if label in used:
             label = f"{label} ({catnr})"
         used.add(label)
@@ -417,7 +431,11 @@ html,body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,sa
 #info{flex:2 1 280px;position:relative;z-index:2;display:none;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;align-self:flex-start}
 #info h2{margin:0 0 10px;font-size:20px}
 .g{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px;margin-bottom:12px}
-.g small{display:block;opacity:.65;font-size:12px}.g b{font-size:17px}
+.g small{display:block;color:color-mix(in srgb,var(--fg) 65%,transparent);font-size:12px}.g b{font-size:17px}
+.g small[data-tip]{cursor:help;position:relative;width:max-content;max-width:100%;text-decoration:underline dotted;text-underline-offset:3px;outline:0}
+.g small[data-tip]::after{content:attr(data-tip);position:absolute;left:0;top:100%;margin-top:6px;width:220px;padding:8px 10px;border-radius:8px;background:var(--bg);color:var(--fg);border:1px solid var(--line);box-shadow:0 4px 14px rgba(0,0,0,.35);font-size:12px;line-height:1.35;text-decoration:none;opacity:0;pointer-events:none;transition:opacity .12s;z-index:20}
+.g div:nth-child(even) small[data-tip]::after{left:auto;right:0}
+.g small[data-tip]:hover::after,.g small[data-tip]:focus::after{opacity:1}
 #desc{line-height:1.45;font-size:14px}#kind{opacity:.6;font-size:12px;margin-top:8px}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/satellite.js@4.1.3/dist/satellite.min.js"></script>
@@ -442,16 +460,18 @@ window.addEventListener('error',e=>{const s=$('status');if(s)s.textContent='Erro
 const S=[];
 D.feat.forEach(f=>S.push({n:f.name,id:f.id,top:true,big:!!f.big,l1:f.l1,l2:f.l2,desc:f.desc,kind:f.kind}));
 const NF=S.length;
-D.auto.split('\n').forEach(line=>{if(!line)return;const p=line.split('\t');S.push({n:p[0],id:+p[1],top:false,big:false,l1:p[2],l2:p[3],desc:'',kind:'none'});});
+D.auto.split('\n').forEach(line=>{if(!line)return;const p=line.split('\t');S.push({n:p[0],id:+p[1],top:false,big:p[4]==='1',deb:/\bDEB\b/.test(p[0]),l1:p[2],l2:p[3],desc:'',kind:'none'});});
 const N=S.length;
+const BIG=Uint8Array.from(S,x=>x.big?1:0),DEB=Uint8Array.from(S,x=>x.deb?1:0),BIGI=[];
+for(let i=0;i<N;i++)if(BIG[i])BIGI.push(i);
 const NAMES=S.map(s=>s.n.toLowerCase());
 const LAT=new Float32Array(N),LON=new Float32Array(N),ALT=new Float32Array(N);
 const SP=new Float32Array(N),CP=new Float32Array(N),SL=new Float32Array(N),CL=new Float32Array(N);
 const SX=new Float32Array(N),SY=new Float32Array(N),OK=new Uint8Array(N),VIS=new Uint8Array(N);
 
 /* ---------- state ---------- */
-const P={dark:{land:'#2b3a42',ocean:'#0e1a22',bord:'#46565e',text:'#e8eef2',dot:'#ff4d4d',auto:'rgba(255,140,140,.85)',sel:'#ffd166',out:'#ffffff'},
-light:{land:'#e6e2d6',ocean:'#cfe3f2',bord:'#b5b0a2',text:'#1b2733',dot:'#d62828',auto:'rgba(200,40,40,.75)',sel:'#f77f00',out:'#1b2733'}};
+const P={dark:{land:'#2b3a42',ocean:'#0e1a22',bord:'#46565e',text:'#e8eef2',dot:'#ff4d4d',auto:'rgba(255,140,140,.85)',deb:'rgba(150,155,170,.55)',sel:'#ffd166',out:'#ffffff'},
+light:{land:'#e6e2d6',ocean:'#cfe3f2',bord:'#b5b0a2',text:'#1b2733',dot:'#d62828',auto:'rgba(200,40,40,.75)',deb:'rgba(105,110,125,.6)',sel:'#f77f00',out:'#1b2733'}};
 let theme='dark',mode='globe',rot=[0,-20],Z=1,ty=0,kG=1,kF=1,W=600,H=500,dpr=1;
 let dirty=true,anim=null,sel=-1,hov=-1,LAND=null,BORD=null,TRK=null,CUR=null,lastCompute=0;
 const cv=$('cv'),ctx=cv.getContext('2d'),wrap=$('mapwrap'),q=$('q'),res=$('res'),clr=$('clr'),info=$('info'),tip=$('tip');
@@ -485,7 +505,7 @@ function tick(){if(busy)return;busy=true;const t=Date.now();
  setTimeout(()=>{if(!MR){MR=new Array(N);for(let i=0;i<N;i++)MR[i]=satellite.twoline2satrec(L[2*i],L[2*i+1]);}
   apply(core(MR,t));busy=false;},0);}
 function startTicker(){if(ticker)return;tick();ticker=setInterval(tick,2000);}
-function useMain(){worker=null;busy=false;if(!ticker)startTicker();else tick();}
+function useMain(){worker=null;busy=false;if(ticker)clearInterval(ticker);ticker=setInterval(tick,5000);tick();}
 function startWorker(){
  try{const src='importScripts('+JSON.stringify(SAT_URL)+');const core='+core.toString()+';let R=null;onmessage=function(e){const m=e.data;if(m.l){R=new Array(m.l.length/2);for(let i=0;i<R.length;i++)R[i]=satellite.twoline2satrec(m.l[2*i],m.l[2*i+1]);postMessage({ready:1});return;}const o=core(R,m.t);postMessage({o:o},[o.buffer]);};';
   const w=new Worker(URL.createObjectURL(new Blob([src],{type:'text/javascript'})));
@@ -538,11 +558,11 @@ function draw(){dirty=false;
  if(sel>=0&&TRK){ctx.beginPath();pc(TRK);ctx.setLineDash([2,6]);ctx.lineCap='round';ctx.strokeStyle=pal.sel;ctx.lineWidth=2;ctx.stroke();ctx.setLineDash([]);}
  project(p);
  const as=Math.min(3.4,1.7+0.35*Math.log2(Z));
- ctx.fillStyle=pal.auto;
- for(let i=NF;i<N;i++){if(!VIS[i]||i===sel)continue;const x=SX[i],y=SY[i];
-  if(x<-4||y<-4||x>W+4||y>H+4)continue;ctx.fillRect(x-as/2,y-as/2,as,as);}
+ for(let pass=0;pass<2;pass++){ctx.fillStyle=pass?pal.auto:pal.deb;
+  for(let i=0;i<N;i++){if(!VIS[i]||i===sel||BIG[i]||DEB[i]===pass)continue;const x=SX[i],y=SY[i];
+   if(x<-4||y<-4||x>W+4||y>H+4)continue;ctx.fillRect(x-as/2,y-as/2,as,as);}}
  ctx.lineWidth=1.2;ctx.strokeStyle=pal.out;ctx.fillStyle=pal.dot;
- for(let i=0;i<NF;i++){if(!VIS[i]||i===sel)continue;ctx.beginPath();ctx.arc(SX[i],SY[i],S[i].big?8:5,0,6.2832);ctx.fill();ctx.stroke();}
+ for(let k=0;k<BIGI.length;k++){const i=BIGI[k];if(!VIS[i]||i===sel)continue;ctx.beginPath();ctx.arc(SX[i],SY[i],8,0,6.2832);ctx.fill();ctx.stroke();}
  if(sel>=0&&VIS[sel]){const x=SX[sel],y=SY[sel];
   ctx.beginPath();ctx.arc(x,y,11,0,6.2832);ctx.fillStyle=pal.sel;ctx.fill();ctx.strokeStyle=pal.out;ctx.lineWidth=1.5;ctx.stroke();
   ctx.font='600 13px system-ui,sans-serif';ctx.textAlign='center';ctx.lineJoin='round';ctx.lineWidth=3;
@@ -562,8 +582,8 @@ function goTo(lat,lon,z){let t={r0:-lon,r1:mode==='globe'?-lat:0,Z:z,ty:0};
 
 /* ---------- interaction ---------- */
 function hit(x,y){let b=-1,bd=1e9;
- for(let i=0;i<N;i++){if(!VIS[i])continue;const dx=SX[i]-x,dy=SY[i]-y,d=dx*dx+dy*dy,f=i<NF,lim=f?(S[i].big?144:100):49;
-  if(d<lim){const w=f?d*.4:d;if(w<bd){bd=w;b=i;}}}
+ for(let i=0;i<N;i++){if(!VIS[i])continue;const dx=SX[i]-x,dy=SY[i]-y,d=dx*dx+dy*dy,bg=BIG[i],lim=bg?144:49;
+  if(d<lim){const w=bg?d*.3:d;if(w<bd){bd=w;b=i;}}}
  return b;}
 function hover(x,y){const i=hit(x,y);cv.style.cursor=i>=0?'pointer':'grab';
  if(i<0){hov=-1;tip.style.display='none';return;}
@@ -598,7 +618,7 @@ function nums(){const c=CUR;if(!c||!$('vA'))return;
  $('vH').textContent=Math.round(c.v*3600).toLocaleString()+' km/h';
  $('vO').textContent=c.lon.toFixed(4)+'°';$('vL').textContent=c.lat.toFixed(4)+'°';}
 function show(){const s=S[sel];info.style.display='block';
- info.innerHTML='<h2 id="nm"></h2><div class="g"><div><small>NORAD ID</small><b>'+s.id+'</b></div><div><small>Altitude</small><b id="vA"></b></div><div><small>Speed</small><b id="vS"></b></div><div><small>Speed</small><b id="vH"></b></div><div><small>Longitude</small><b id="vO"></b></div><div><small>Latitude</small><b id="vL"></b></div></div><div id="desc"></div><div id="kind"></div>';
+ info.innerHTML='<h2 id="nm"></h2><div class="g"><div><small tabindex="0" data-tip="A unique catalog number that NORAD (the North American Aerospace Defense Command) gives to every object it tracks in orbit. It never changes, even if the name does.">NORAD ID</small><b>'+s.id+'</b></div><div><small tabindex="0" data-tip="How high the satellite is above the Earth surface right now, in kilometres.">Altitude</small><b id="vA"></b></div><div><small tabindex="0" data-tip="How fast the satellite is moving through space, relative to the center of the Earth.">Speed</small><b id="vS"></b></div><div><small tabindex="0" data-tip="How fast the satellite is moving through space, relative to the center of the Earth.">Speed</small><b id="vH"></b></div><div><small tabindex="0" data-tip="East-west position of the point on the ground directly below the satellite, from -180 to 180 degrees (0 is Greenwich, positive is east).">Longitude</small><b id="vO"></b></div><div><small tabindex="0" data-tip="North-south position of the point on the ground directly below the satellite, from -90 (south pole) to 90 (north pole) degrees.">Latitude</small><b id="vL"></b></div></div><div id="desc"></div><div id="kind"></div>';
  $('nm').textContent=s.n;$('desc').textContent=s.desc;
  $('kind').textContent=s.kind==='ai'?'✨ AI-generated description. It may contain errors.':s.kind==='wiki'?'Summary from Wikipedia'+(s.wt?' ('+s.wt+')':'')+'. It may not match this exact satellite.':s.kind==='loading'?'Looking for a Wikipedia summary…':'';
  nums();if(s.kind==='none')wiki(s,sel);}
@@ -654,7 +674,7 @@ if not meta:
     st.stop()
 
 if DEBUG:
-    st.caption(f"version 14 · fast map · {len(meta):,} satellites ({len(satellites)} featured)")
+    st.caption(f"version 15 · {len(meta):,} satellites ({len(satellites)} featured)")
     if errors:
         st.warning("Could not load: " + ", ".join(f"{k} ({v})" for k, v in errors.items()))
     st.dataframe(
@@ -671,11 +691,11 @@ with st.spinner("Preparing descriptions..."):
         if m["top"]:  # your featured satellites: written text, else AI / Wikipedia
             text, kind, note = get_description(label, m["id"], launch_year(satellites[label]))
             feat.append(
-                {"name": label, "id": m["id"], "big": label in FAMOUS,
+                {"name": label, "id": m["id"], "big": m["id"] in FAMOUS_IDS,
                  "l1": l1, "l2": l2, "desc": text, "kind": kind}
             )
         else:  # everything added automatically: the browser looks up a Wikipedia summary
-            auto_lines.append(f"{label}\t{m['id']}\t{l1}\t{l2}")
+            auto_lines.append(f"{label}\t{m['id']}\t{l1}\t{l2}\t{1 if m['id'] in FAMOUS_IDS else 0}")
 
 payload = {"feat": feat, "auto": "\n".join(auto_lines)}
 data_json = json.dumps(payload).replace("</", "<\\/")
